@@ -345,7 +345,7 @@ fn the_header_boundaries_are_exact() {
 }
 
 /// The reservation block, with entries in it. The fixtures' is empty, so `memory_reservations` could
-/// return `Ok(0)` unconditionally, mis-stride the walk, or treat "starts at zero" as the
+/// return `Ok(0)` unconditionally, stride the walk wrongly, or treat "starts at zero" as the
 /// terminator (the `&&` in the all-zero check becoming `||`), and a reservation at address zero
 /// is exactly the entry firmware writes for its own vector table.
 #[test]

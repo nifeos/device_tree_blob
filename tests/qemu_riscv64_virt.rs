@@ -212,7 +212,7 @@ fn reads_a_property_from_every_matching_node() {
     // A node that exists and has no such property: matched, and reported as `None`.
     let mut absent = [Some(&b"stale"[..]); 4];
     assert_eq!(
-        tree.node_properties(b"cpu@", b"mmu-flavour", &mut absent)
+        tree.node_properties(b"cpu@", b"mmu-flavor", &mut absent)
             .unwrap(),
         1
     );
