@@ -210,7 +210,7 @@ fn a_node_at_the_deepest_depth_is_found_and_one_deeper_is_refused() {
 /// blob, and a kernel placing its allocator calls it on every RAM region the device tree declares.
 /// Under the dev profile's overflow checks that is a panic on the boot path.
 #[test]
-fn a_memory_region_that_wraps_the_address_space_is_refused() {
+fn a_memory_region_that_wraps_around_is_refused() {
     let mut b = Blob::new();
     b.begin_node(b"");
     b.prop(b"#address-cells", &2u32.to_be_bytes());
@@ -389,7 +389,7 @@ fn reservations_are_read_entry_by_entry() {
 /// every value; and the second entry is what catches a pair stride that multiplied where it
 /// should have added.
 #[test]
-fn memory_with_one_address_cell() {
+fn memory_with_one_start_cell() {
     let mut b = Blob::new();
     b.begin_node(b"");
     b.prop(b"#address-cells", &1u32.to_be_bytes());
@@ -1601,7 +1601,7 @@ fn a_property_length_past_the_blob_is_truncated_in_every_lookup() {
 
 /// Header offsets of the fields the structure-block bound reads.
 const VERSION_AT: usize = 20;
-const STRUCTURE_BLOCK_SIZE_AT: usize = 36;
+const STRUCTURE_BLOCK_SIZE_OFFSET_BYTES: usize = 36;
 
 /// A structure block with no `FDT_END` is not walked on into the strings block. The last token is
 /// overwritten with `FDT_NOP`, so the walk runs out of structure and must say so. It used to read
@@ -1646,18 +1646,19 @@ fn the_declared_structure_size_bounds_the_walk() {
     let blob = minimal_tree();
     let total = blob.len() as u32;
     assert_eq!(
-        DeviceTreeBlob::from_bytes(&patched(&blob, STRUCTURE_BLOCK_SIZE_AT, total)).err(),
+        DeviceTreeBlob::from_bytes(&patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, total)).err(),
         Some(Error::Truncated),
         "a structure block longer than the blob"
     );
     assert_eq!(
-        DeviceTreeBlob::from_bytes(&patched(&blob, STRUCTURE_BLOCK_SIZE_AT, u32::MAX)).err(),
+        DeviceTreeBlob::from_bytes(&patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, u32::MAX))
+            .err(),
         Some(Error::Truncated),
         "a structure size that wraps the offset"
     );
 
     // Two bytes short of the first token: no walker may read it.
-    let short = patched(&blob, STRUCTURE_BLOCK_SIZE_AT, 2);
+    let short = patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, 2);
     let dt = DeviceTreeBlob::from_bytes(&short).unwrap();
     let mut out = [Region {
         start: 0,
@@ -1671,7 +1672,11 @@ fn the_declared_structure_size_bounds_the_walk() {
 #[test]
 fn a_blob_older_than_version_17_ends_its_structure_at_the_strings() {
     let blob = minimal_tree();
-    let old = patched(&patched(&blob, VERSION_AT, 16), STRUCTURE_BLOCK_SIZE_AT, 0);
+    let old = patched(
+        &patched(&blob, VERSION_AT, 16),
+        STRUCTURE_BLOCK_SIZE_OFFSET_BYTES,
+        0,
+    );
     let dt = DeviceTreeBlob::from_bytes(&old).unwrap();
     let mut out = [Region {
         start: 0,
@@ -1762,13 +1767,13 @@ fn a_property_value_is_bounded_by_the_structure_block_exactly() {
     b.end_node();
     let blob = b.finish();
     let size_dt_struct = u32::from_be_bytes(
-        blob[STRUCTURE_BLOCK_SIZE_AT..STRUCTURE_BLOCK_SIZE_AT + 4]
+        blob[STRUCTURE_BLOCK_SIZE_OFFSET_BYTES..STRUCTURE_BLOCK_SIZE_OFFSET_BYTES + 4]
             .try_into()
             .unwrap(),
     );
     let at_the_end = patched(
         &blob,
-        STRUCTURE_BLOCK_SIZE_AT,
+        STRUCTURE_BLOCK_SIZE_OFFSET_BYTES,
         size_dt_struct - AFTER_THE_VALUE,
     );
     let dt = DeviceTreeBlob::from_bytes(&at_the_end).unwrap();
@@ -1824,11 +1829,11 @@ fn a_value_of_the_wrong_shape_is_a_bad_value() {
     b.structure.extend_from_slice(b"abcd");
     let blob = b.finish();
     let name_ends = u32::from_be_bytes(
-        blob[STRUCTURE_BLOCK_SIZE_AT..STRUCTURE_BLOCK_SIZE_AT + 4]
+        blob[STRUCTURE_BLOCK_SIZE_OFFSET_BYTES..STRUCTURE_BLOCK_SIZE_OFFSET_BYTES + 4]
             .try_into()
             .unwrap(),
     ) - 4;
-    let blob = patched(&blob, STRUCTURE_BLOCK_SIZE_AT, name_ends);
+    let blob = patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, name_ends);
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
     assert_eq!(dt.boot_arguments(), Err(Error::BadValue));
 }
@@ -1867,11 +1872,11 @@ fn every_error_displays_as_its_own_sentence() {
 /// memory node, a named device and a reserved-memory child all carrying `reg`.
 #[test]
 fn a_reg_that_does_not_fit_a_region_is_a_bad_value() {
-    fn tree(address_cells: u32, size_cells: u32, reg: &[u32]) -> Vec<u8> {
+    fn tree(start_cells: u32, size_cells: u32, reg: &[u32]) -> Vec<u8> {
         let reg: Vec<u8> = reg.iter().flat_map(|cell| cell.to_be_bytes()).collect();
         let mut b = Blob::new();
         b.begin_node(b"");
-        b.prop(b"#address-cells", &address_cells.to_be_bytes());
+        b.prop(b"#address-cells", &start_cells.to_be_bytes());
         b.prop(b"#size-cells", &size_cells.to_be_bytes());
         b.begin_node(b"memory@0");
         b.prop(b"reg", &reg);
@@ -1881,7 +1886,7 @@ fn a_reg_that_does_not_fit_a_region_is_a_bad_value() {
         b.prop(b"reg", &reg);
         b.end_node();
         b.begin_node(b"reserved-memory");
-        b.prop(b"#address-cells", &address_cells.to_be_bytes());
+        b.prop(b"#address-cells", &start_cells.to_be_bytes());
         b.prop(b"#size-cells", &size_cells.to_be_bytes());
         b.begin_node(b"firmware@0");
         b.prop(b"reg", &reg);
