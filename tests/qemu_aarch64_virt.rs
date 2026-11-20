@@ -229,13 +229,13 @@ fn no_reserved_memory_node_is_zero_regions() {
     assert_eq!(tree.reserved_memory_regions(&mut regs).unwrap(), 0);
 }
 
-/// **The RTC, found by binding rather than by label**. The aarch64 `virt` board
+/// **The real-time clock (RTC), found by binding rather than by label**. The aarch64 `virt` board
 /// calls the node `pl031@9010000` and the RISC-V one calls its RTC `rtc@101000`, so no single name
 /// prefix finds both and a driver that matched on the name would silently find nothing on the other
-/// ISA. `compatible` is what the two boards agree to disagree about honestly.
+/// instruction set architecture (ISA). `compatible` is what the two boards agree to disagree about honestly.
 ///
 /// Two properties of the parser ride along here. The node declares
-/// `compatible = "arm,pl031", "arm,primecell"`, so matching it at all proves the NUL-separated list
+/// `compatible = "arm,pl031", "arm,primecell"`, so matching it at all proves the zero byte-separated list
 /// is split rather than compared whole. And its `reg` is written **before** its `compatible`, which
 /// is why the decode has to wait for the node to close instead of deciding at the `reg` property.
 #[test]
@@ -279,7 +279,7 @@ fn the_goldfish_rtc_is_absent_on_aarch64() {
 /// **`interrupt-parent` lives on the ROOT of this tree**, one declaration for every device on the
 /// machine; the pl011 itself does not carry it. So `node_property` honestly answers `None`, and only
 /// the inherited read can decode any `interrupts` on this board at all. The parent it finds is
-/// the GIC, whose `#interrupt-cells = <3>` is what makes the pl011's `<0 1 4>` mean SPI 1.
+/// the generic interrupt controller (GIC), whose `#interrupt-cells = <3>` is what makes the pl011's `<0 1 4>` mean shared peripheral interrupt (SPI) 1.
 #[test]
 fn inherits_the_interrupt_parent_from_the_root() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_VIRT).unwrap();

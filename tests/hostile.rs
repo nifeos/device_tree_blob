@@ -40,7 +40,7 @@ impl Blob {
         self
     }
 
-    /// `FDT_BEGIN_NODE` plus the node's name, NUL-terminated and padded to four bytes.
+    /// `FDT_BEGIN_NODE` plus the node's name, zero byte-terminated and padded to four bytes.
     fn begin_node(&mut self, name: &[u8]) -> &mut Self {
         self.token(1);
         self.structure.extend_from_slice(name);
@@ -210,7 +210,7 @@ fn a_node_at_the_deepest_depth_is_found_and_one_deeper_is_refused() {
 /// blob, and a kernel placing its allocator calls it on every RAM region the device tree declares.
 /// Under the dev profile's overflow checks that is a panic on the boot path.
 #[test]
-fn a_memory_region_that_wraps_the_address_space_is_refused() {
+fn a_memory_region_that_wraps_around_is_refused() {
     let mut b = Blob::new();
     b.begin_node(b"");
     b.prop(b"#address-cells", &2u32.to_be_bytes());
@@ -345,8 +345,8 @@ fn the_header_boundaries_are_exact() {
 }
 
 /// The reservation block, with entries in it. The fixtures' is empty, so `memory_reservations` could
-/// return `Ok(0)` unconditionally, mis-stride the walk, or treat "starts at zero" as the
-/// terminator (the `&&` in the all-zero check becoming `||`), and a reservation AT address zero
+/// return `Ok(0)` unconditionally, stride the walk wrongly, or treat "starts at zero" as the
+/// terminator (the `&&` in the all-zero check becoming `||`), and a reservation at address zero
 /// is exactly the entry firmware writes for its own vector table.
 #[test]
 fn reservations_are_read_entry_by_entry() {
@@ -389,7 +389,7 @@ fn reservations_are_read_entry_by_entry() {
 /// every value; and the second entry is what catches a pair stride that multiplied where it
 /// should have added.
 #[test]
-fn memory_with_one_address_cell() {
+fn memory_with_one_start_cell() {
     let mut b = Blob::new();
     b.begin_node(b"");
     b.prop(b"#address-cells", &1u32.to_be_bytes());
@@ -678,7 +678,7 @@ fn initial_ramdisk_reads_widths_and_refuses_the_empty_and_the_misnamed() {
     );
 }
 
-/// The command line, boundary by boundary: the NUL comes off, a value with no NUL is returned
+/// The command line, boundary by boundary: the zero byte comes off, a value with no zero byte is returned
 /// whole, a `bootargs` under any node but the root's own `chosen` is not the command line (even a
 /// `chosen` child of `chosen`), and a tree with no `/chosen` has none.
 #[test]
@@ -1358,7 +1358,7 @@ fn a_cells_declaration_that_is_not_one_cell_is_ignored() {
     assert_eq!((out[0].start, out[0].size_bytes), (0x2000, 0x20));
 }
 
-/// An empty needle names no device. A `compatible` value ends in a NUL, so splitting it on NUL
+/// An empty needle names no device. A `compatible` value ends in a zero byte, so splitting it on zero byte
 /// leaves an empty last piece, and that piece is not an entry: counting it would answer
 /// `node_register_regions_compatible(b"")` with the first node that has any `compatible` at all. No caller
 /// passes an empty needle; the fuzz target does, and dtoolkit's `is_compatible("")` matches
@@ -1601,7 +1601,7 @@ fn a_property_length_past_the_blob_is_truncated_in_every_lookup() {
 
 /// Header offsets of the fields the structure-block bound reads.
 const VERSION_AT: usize = 20;
-const STRUCTURE_BLOCK_SIZE_AT: usize = 36;
+const STRUCTURE_BLOCK_SIZE_OFFSET_BYTES: usize = 36;
 
 /// A structure block with no `FDT_END` is not walked on into the strings block. The last token is
 /// overwritten with `FDT_NOP`, so the walk runs out of structure and must say so. It used to read
@@ -1646,18 +1646,19 @@ fn the_declared_structure_size_bounds_the_walk() {
     let blob = minimal_tree();
     let total = blob.len() as u32;
     assert_eq!(
-        DeviceTreeBlob::from_bytes(&patched(&blob, STRUCTURE_BLOCK_SIZE_AT, total)).err(),
+        DeviceTreeBlob::from_bytes(&patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, total)).err(),
         Some(Error::Truncated),
         "a structure block longer than the blob"
     );
     assert_eq!(
-        DeviceTreeBlob::from_bytes(&patched(&blob, STRUCTURE_BLOCK_SIZE_AT, u32::MAX)).err(),
+        DeviceTreeBlob::from_bytes(&patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, u32::MAX))
+            .err(),
         Some(Error::Truncated),
         "a structure size that wraps the offset"
     );
 
     // Two bytes short of the first token: no walker may read it.
-    let short = patched(&blob, STRUCTURE_BLOCK_SIZE_AT, 2);
+    let short = patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, 2);
     let dt = DeviceTreeBlob::from_bytes(&short).unwrap();
     let mut out = [Region {
         start: 0,
@@ -1671,7 +1672,8 @@ fn the_declared_structure_size_bounds_the_walk() {
 #[test]
 fn a_blob_older_than_version_17_ends_its_structure_at_the_strings() {
     let blob = minimal_tree();
-    let old = patched(&patched(&blob, VERSION_AT, 16), STRUCTURE_BLOCK_SIZE_AT, 0);
+    let version_16 = patched(&blob, VERSION_AT, 16);
+    let old = patched(&version_16, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, 0);
     let dt = DeviceTreeBlob::from_bytes(&old).unwrap();
     let mut out = [Region {
         start: 0,
@@ -1762,11 +1764,12 @@ fn a_property_value_is_bounded_by_the_structure_block_exactly() {
     b.end_node();
     let blob = b.finish();
     let size_dt_struct = u32::from_be_bytes(
-        blob[STRUCTURE_BLOCK_SIZE_AT..STRUCTURE_BLOCK_SIZE_AT + 4]
+        blob[STRUCTURE_BLOCK_SIZE_OFFSET_BYTES..STRUCTURE_BLOCK_SIZE_OFFSET_BYTES + 4]
             .try_into()
             .unwrap(),
     );
-    let at_the_end = patched(&blob, STRUCTURE_BLOCK_SIZE_AT, size_dt_struct - AFTER_THE_VALUE);
+    let last_size = size_dt_struct - AFTER_THE_VALUE;
+    let at_the_end = patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, last_size);
     let dt = DeviceTreeBlob::from_bytes(&at_the_end).unwrap();
     let value = reg64(0x4000_0000, 0x1000);
     assert_eq!(value.len(), VALUE_BYTES as usize);
@@ -1780,7 +1783,7 @@ fn a_property_value_is_bounded_by_the_structure_block_exactly() {
 
 /// A value of the wrong shape is `BadValue`, not `Truncated`: the blob is long enough, and what it
 /// holds is wrong. An integer property of two bytes is neither width the specification allows, and
-/// a name whose block ends before its NUL has no end. Each fault names itself, so a boot log that
+/// a name whose block ends before its zero byte has no end. Each fault names itself, so a boot log that
 /// prints the error says which one the firmware made.
 #[test]
 fn a_value_of_the_wrong_shape_is_a_bad_value() {
@@ -1820,11 +1823,11 @@ fn a_value_of_the_wrong_shape_is_a_bad_value() {
     b.structure.extend_from_slice(b"abcd");
     let blob = b.finish();
     let name_ends = u32::from_be_bytes(
-        blob[STRUCTURE_BLOCK_SIZE_AT..STRUCTURE_BLOCK_SIZE_AT + 4]
+        blob[STRUCTURE_BLOCK_SIZE_OFFSET_BYTES..STRUCTURE_BLOCK_SIZE_OFFSET_BYTES + 4]
             .try_into()
             .unwrap(),
     ) - 4;
-    let blob = patched(&blob, STRUCTURE_BLOCK_SIZE_AT, name_ends);
+    let blob = patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, name_ends);
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
     assert_eq!(dt.boot_arguments(), Err(Error::BadValue));
 }
@@ -1863,11 +1866,11 @@ fn every_error_displays_as_its_own_sentence() {
 /// memory node, a named device and a reserved-memory child all carrying `reg`.
 #[test]
 fn a_reg_that_does_not_fit_a_region_is_a_bad_value() {
-    fn tree(address_cells: u32, size_cells: u32, reg: &[u32]) -> Vec<u8> {
+    fn tree(start_cells: u32, size_cells: u32, reg: &[u32]) -> Vec<u8> {
         let reg: Vec<u8> = reg.iter().flat_map(|cell| cell.to_be_bytes()).collect();
         let mut b = Blob::new();
         b.begin_node(b"");
-        b.prop(b"#address-cells", &address_cells.to_be_bytes());
+        b.prop(b"#address-cells", &start_cells.to_be_bytes());
         b.prop(b"#size-cells", &size_cells.to_be_bytes());
         b.begin_node(b"memory@0");
         b.prop(b"reg", &reg);
@@ -1877,7 +1880,7 @@ fn a_reg_that_does_not_fit_a_region_is_a_bad_value() {
         b.prop(b"reg", &reg);
         b.end_node();
         b.begin_node(b"reserved-memory");
-        b.prop(b"#address-cells", &address_cells.to_be_bytes());
+        b.prop(b"#address-cells", &start_cells.to_be_bytes());
         b.prop(b"#size-cells", &size_cells.to_be_bytes());
         b.begin_node(b"firmware@0");
         b.prop(b"reg", &reg);

@@ -1,7 +1,7 @@
 //! A minimal flattened device tree (FDT) parser: bytes in, regions and property values out.
 //!
 //! The blob is the machine describing itself (where RAM, the serial port and the interrupt
-//! controller are, how many CPUs exist), handed over by firmware: a bootloader, a UEFI loader or
+//! controller are, how many CPUs exist), handed over by firmware: a bootloader, a Unified Extensible Firmware Interface (UEFI) loader or
 //! QEMU. Every integer in it is big-endian, so every read goes through `be32` or `be64`. The blob
 //! is untrusted input: every offset is checked, every walk is bounded, and a malformed blob is an
 //! [`Error`] rather than a panic. The crate is pure logic with no target code, so its tests run on
@@ -52,7 +52,7 @@ pub enum Error {
     /// reaches the end of the structure block without its end token.
     Truncated,
     /// A value has the wrong shape for what it holds: an integer property that is neither 4 nor 8
-    /// bytes long, a node or property name with no terminating NUL inside its block, or a `reg`
+    /// bytes long, a node or property name with no terminating zero byte inside its block, or a `reg`
     /// that does not fit a [`Region`]. That last is a cell count above [`MAXIMUM_CELLS`], a
     /// nonzero cell above the low two (a value wider than 64 bits), or a length that is not a
     /// whole number of (address, size) pairs.
@@ -420,7 +420,7 @@ impl<'a> DeviceTreeBlob<'a> {
     /// property) of the first node whose name starts with `prefix`, searched at any depth.
     ///
     /// Decodes with the `#address-cells`/`#size-cells` of the node's **parent**, carried down a
-    /// per-depth stack, so a device nested under `/soc` reads as well as one under the root. A GIC
+    /// per-depth stack, so a device nested under `/soc` reads as well as one under the root. A generic interrupt controller (GIC)
     /// decodes to two regions, distributor first, as its binding orders them. Matching a name prefix
     /// rather than `compatible` is a simplification; [`node_register_regions_compatible`](Self::node_register_regions_compatible)
     /// is the correct lookup. The first match is the answer: one with no `reg` yields zero regions, and
@@ -480,9 +480,9 @@ impl<'a> DeviceTreeBlob<'a> {
     /// The register regions (`reg`, the Devicetree Specification's abbreviation for the
     /// property) of the first node whose `compatible` property lists the entry `compatible`, searched at any depth.
     ///
-    /// A match on **any** NUL-separated entry counts, as the binding intends: a node that says
-    /// `"starfive,jh7110-rtc\0arm,pl031"` claims the PL031 register layout. The empty piece after the
-    /// final NUL is not an entry, so an empty `compatible` matches nothing. The property may follow
+    /// A match on **any** zero-byte-separated entry counts, as the binding intends: a node that says
+    /// `"starfive,jh7110-rtc\0arm,pl031"` claims the real-time clock register layout. The empty piece after the
+    /// final zero byte is not an entry, so an empty `compatible` matches nothing. The property may follow
     /// `reg` in the same node, so each open node's `reg` is remembered on a per-depth stack and
     /// decoded when the matched node closes; a matched parent is still answered after its
     /// children close. Returns zero regions for a match with no `reg`.
@@ -569,7 +569,7 @@ impl<'a> DeviceTreeBlob<'a> {
     ///
     /// The property twin of [`node_register_regions_compatible`](Self::node_register_regions_compatible), deciding when the
     /// matched node closes for the same reason. It exists because labels differ between machines:
-    /// the PLIC is `plic@c000000` on QEMU `virt` and `interrupt-controller@c000000` on the JH7110.
+    /// the platform-level interrupt controller (PLIC) is `plic@c000000` on QEMU `virt` and `interrupt-controller@c000000` on the JH7110.
     pub fn node_property_compatible(
         &self,
         compatible: &[u8],
@@ -582,7 +582,7 @@ impl<'a> DeviceTreeBlob<'a> {
     /// property lists the entry `compatible`. `Ok(None)` when no such node exists, or its parent
     /// has no such property.
     ///
-    /// For a device described as a child of its bus, such as a PMIC under one of seven identical
+    /// For a device described as a child of its bus, such as a power management chip under one of seven identical
     /// `snps,designware-i2c` controllers on the JH7110, whose `clocks` and `resets` sit on
     /// the bus. The parent's slot is filled when the child closes, because a node's properties
     /// precede its first subnode.
@@ -849,7 +849,7 @@ impl<'a> DeviceTreeBlob<'a> {
     /// anywhere deeper is not the reservation list and is not read.
     ///
     /// The other place firmware names memory the OS must not touch, beside the block
-    /// [`memory_reservations`](Self::memory_reservations) reads; on RISC-V, OpenSBI reserves its PMP-guarded
+    /// [`memory_reservations`](Self::memory_reservations) reads; on RISC-V, `OpenSBI` reserves its physical-memory-protection-guarded
     /// region here, and missing it faults the first write into it. Each depth-3 child's `reg` is
     /// decoded with `/reserved-memory`'s own cell counts, which default to the root's.
     pub fn reserved_memory_regions(&self, out: &mut [Region]) -> Result<usize, Error> {
@@ -942,12 +942,12 @@ impl<'a> DeviceTreeBlob<'a> {
         })
     }
 
-    /// **The kernel's command line**: `/chosen/bootargs`, without its terminating NUL, or
+    /// **The kernel's command line**: `/chosen/bootargs`, without its terminating zero byte, or
     /// `Ok(None)` when the tree has no `/chosen` or no such property.
     ///
     /// QEMU writes it from `-append`, U-Boot from its `bootargs` variable, and a UEFI loader from
     /// the device-tree patch it applies. Only the root's own `chosen` child counts, as for
-    /// [`Self::initial_ramdisk`]. A value with no NUL is returned whole, since the property's
+    /// [`Self::initial_ramdisk`]. A value with no zero byte is returned whole, since the property's
     /// length bounds it either way.
     #[doc(alias = "bootargs")]
     pub fn boot_arguments(&self) -> Result<Option<&'a [u8]>, Error> {
@@ -1117,8 +1117,8 @@ fn declare_cells(name: &[u8], value: &[u8], bus_address_cells: &mut u32, bus_siz
     }
 }
 
-/// Whether a `compatible` value, a list of NUL-terminated strings, lists `entry`. The empty piece
-/// after the final NUL is not an entry, so an empty `entry` matches nothing.
+/// Whether a `compatible` value, a list of zero byte-terminated strings, lists `entry`. The empty piece
+/// after the final zero byte is not an entry, so an empty `entry` matches nothing.
 fn lists_entry(value: &[u8], entry: &[u8]) -> bool {
     value
         .split(|&b| b == 0)
@@ -1229,7 +1229,7 @@ fn skip_padded(at: usize, n: usize) -> Result<usize, Error> {
         .ok_or(Error::Truncated)
 }
 
-/// Where the token after a node's name starts: the name, its NUL, and the padding to four bytes.
+/// Where the token after a node's name starts: the name, its zero byte, and the padding to four bytes.
 fn skip_name(at: usize, name: &[u8]) -> Result<usize, Error> {
     skip_padded(at, name.len().checked_add(1).ok_or(Error::Truncated)?)
 }
