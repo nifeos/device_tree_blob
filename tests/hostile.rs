@@ -1672,11 +1672,8 @@ fn the_declared_structure_size_bounds_the_walk() {
 #[test]
 fn a_blob_older_than_version_17_ends_its_structure_at_the_strings() {
     let blob = minimal_tree();
-    let old = patched(
-        &patched(&blob, VERSION_AT, 16),
-        STRUCTURE_BLOCK_SIZE_OFFSET_BYTES,
-        0,
-    );
+    let version_16 = patched(&blob, VERSION_AT, 16);
+    let old = patched(&version_16, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, 0);
     let dt = DeviceTreeBlob::from_bytes(&old).unwrap();
     let mut out = [Region {
         start: 0,
@@ -1771,11 +1768,8 @@ fn a_property_value_is_bounded_by_the_structure_block_exactly() {
             .try_into()
             .unwrap(),
     );
-    let at_the_end = patched(
-        &blob,
-        STRUCTURE_BLOCK_SIZE_OFFSET_BYTES,
-        size_dt_struct - AFTER_THE_VALUE,
-    );
+    let last_size = size_dt_struct - AFTER_THE_VALUE;
+    let at_the_end = patched(&blob, STRUCTURE_BLOCK_SIZE_OFFSET_BYTES, last_size);
     let dt = DeviceTreeBlob::from_bytes(&at_the_end).unwrap();
     let value = reg64(0x4000_0000, 0x1000);
     assert_eq!(value.len(), VALUE_BYTES as usize);
