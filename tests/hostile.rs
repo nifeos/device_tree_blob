@@ -40,7 +40,7 @@ impl Blob {
         self
     }
 
-    /// `FDT_BEGIN_NODE` plus the node's name, NUL-terminated and padded to four bytes.
+    /// `FDT_BEGIN_NODE` plus the node's name, zero byte-terminated and padded to four bytes.
     fn begin_node(&mut self, name: &[u8]) -> &mut Self {
         self.token(1);
         self.structure.extend_from_slice(name);
@@ -346,7 +346,7 @@ fn the_header_boundaries_are_exact() {
 
 /// The reservation block, with entries in it. The fixtures' is empty, so `memory_reservations` could
 /// return `Ok(0)` unconditionally, mis-stride the walk, or treat "starts at zero" as the
-/// terminator (the `&&` in the all-zero check becoming `||`), and a reservation AT address zero
+/// terminator (the `&&` in the all-zero check becoming `||`), and a reservation at address zero
 /// is exactly the entry firmware writes for its own vector table.
 #[test]
 fn reservations_are_read_entry_by_entry() {
@@ -678,7 +678,7 @@ fn initial_ramdisk_reads_widths_and_refuses_the_empty_and_the_misnamed() {
     );
 }
 
-/// The command line, boundary by boundary: the NUL comes off, a value with no NUL is returned
+/// The command line, boundary by boundary: the zero byte comes off, a value with no zero byte is returned
 /// whole, a `bootargs` under any node but the root's own `chosen` is not the command line (even a
 /// `chosen` child of `chosen`), and a tree with no `/chosen` has none.
 #[test]
@@ -1358,7 +1358,7 @@ fn a_cells_declaration_that_is_not_one_cell_is_ignored() {
     assert_eq!((out[0].start, out[0].size_bytes), (0x2000, 0x20));
 }
 
-/// An empty needle names no device. A `compatible` value ends in a NUL, so splitting it on NUL
+/// An empty needle names no device. A `compatible` value ends in a zero byte, so splitting it on zero byte
 /// leaves an empty last piece, and that piece is not an entry: counting it would answer
 /// `node_register_regions_compatible(b"")` with the first node that has any `compatible` at all. No caller
 /// passes an empty needle; the fuzz target does, and dtoolkit's `is_compatible("")` matches
@@ -1766,7 +1766,11 @@ fn a_property_value_is_bounded_by_the_structure_block_exactly() {
             .try_into()
             .unwrap(),
     );
-    let at_the_end = patched(&blob, STRUCTURE_BLOCK_SIZE_AT, size_dt_struct - AFTER_THE_VALUE);
+    let at_the_end = patched(
+        &blob,
+        STRUCTURE_BLOCK_SIZE_AT,
+        size_dt_struct - AFTER_THE_VALUE,
+    );
     let dt = DeviceTreeBlob::from_bytes(&at_the_end).unwrap();
     let value = reg64(0x4000_0000, 0x1000);
     assert_eq!(value.len(), VALUE_BYTES as usize);
@@ -1780,7 +1784,7 @@ fn a_property_value_is_bounded_by_the_structure_block_exactly() {
 
 /// A value of the wrong shape is `BadValue`, not `Truncated`: the blob is long enough, and what it
 /// holds is wrong. An integer property of two bytes is neither width the specification allows, and
-/// a name whose block ends before its NUL has no end. Each fault names itself, so a boot log that
+/// a name whose block ends before its zero byte has no end. Each fault names itself, so a boot log that
 /// prints the error says which one the firmware made.
 #[test]
 fn a_value_of_the_wrong_shape_is_a_bad_value() {

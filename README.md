@@ -6,8 +6,8 @@
 [![minimum Rust version](https://img.shields.io/badge/rust-1.88%2B-blue.svg)](https://github.com/nifeos/device_tree_blob/blob/main/Cargo.toml)
 
 A flattened device tree parser: bytes in, memory regions, register regions and property values out.
-The device tree blob is the machine describing itself, handed over by firmware (a bootloader, a UEFI
-loader or QEMU). The crate reads it as untrusted input. It checks every offset and bounds every
+The device tree blob is the machine describing itself, handed over by firmware (a bootloader, a Unified Extensible Firmware
+Interface (UEFI) loader or QEMU). The crate reads it as untrusted input. It checks every offset and bounds every
 walk, and a malformed blob is an `Error`, never a panic. It is `no_std`, has no allocator and no
 dependencies, and reads the flattened format of chapter 5 of the Devicetree Specification
 (release 0.4), versions up to 17.

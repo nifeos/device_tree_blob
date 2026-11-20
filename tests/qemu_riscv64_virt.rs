@@ -1,7 +1,7 @@
 //! Parse the RISC-V virt board's device tree, the second machine we boot on, on the host.
 //!
 //! It holds two parser features the aarch64 tree never exercises: a device nested under `/soc`
-//! (the PLIC) and the `/reserved-memory` node OpenSBI fences its firmware with. Regenerate the
+//! (the PLIC) and the `/reserved-memory` node `OpenSBI` fences its firmware with. Regenerate the
 //! fixture with the following, re-adding `/reserved-memory` by hand (the `.dts` says why):
 //!
 //!     qemu-system-riscv64 -machine virt,dumpdtb=f.dtb -nographic
@@ -96,7 +96,7 @@ fn finds_the_plics_context_list_by_compatible() {
 /// **The parent's property, not the node's**. The PLIC sits under
 /// `/soc`, so asking its parent for `compatible` must answer `simple-bus` (the soc's) and asking
 /// for `interrupts-extended` must answer nothing, although the PLIC itself has one. The use on a
-/// board is a PMIC under the I2C bus whose clocks and resets a driver needs; this is the same walk
+/// board is a power management chip under the I2C bus whose clocks and resets a driver needs; this is the same walk
 /// on a tree QEMU writes.
 #[test]
 fn finds_the_parent_of_a_compatible_node() {
@@ -119,9 +119,9 @@ fn finds_the_parent_of_a_compatible_node() {
     );
 }
 
-/// The OpenSBI firmware regions, from the `/reserved-memory` node. Missing these is the bug the
-/// function exists to prevent: the frame allocator hands out OpenSBI's RAM and the first write
-/// faults on a PMP violation, in code nowhere near the allocator.
+/// The `OpenSBI` firmware regions, from the `/reserved-memory` node. Missing these is the bug the
+/// function exists to prevent: the frame allocator hands out `OpenSBI`'s RAM and the first write
+/// faults on a physical memory protection violation, in code nowhere near the allocator.
 #[test]
 fn finds_opensbis_reserved_memory() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
@@ -173,7 +173,7 @@ fn finds_the_rtc_by_compatible() {
     );
 }
 
-/// And the PL031 is not on this board. Both boots probe for both devices, so both absences are
+/// And the real-time clock is not on this board. Both boots probe for both devices, so both absences are
 /// answers the code takes every time it runs.
 #[test]
 fn the_pl031_is_absent_on_riscv() {
