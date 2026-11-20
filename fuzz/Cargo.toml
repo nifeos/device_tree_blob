@@ -1,0 +1,22 @@
+[package]
+name = "fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+device_tree_blob = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "device_tree_blob_walk"
+path = "fuzz_targets/device_tree_blob_walk.rs"
+test = false
+doc = false
+bench = false

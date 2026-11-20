@@ -1,0 +1,24 @@
+Falsifies `device_tree_blob::verification::cells_refuses_a_value_wider_than_64_bits`.
+
+The defect: `cells` drops its check that the value so far fits in 32 bits before it shifts the
+next cell in. The loop still compiles and still reads one- and two-cell values correctly, which is
+all most real trees declare; only a nonzero cell above the low two differs, and then the high cell
+is shifted out of the u64 and the region is silently truncated to its low 64 bits, which is how
+Linux's `of_read_number` reads it and what this crate refuses.
+
+Expected to fail: the harness's `assert!(value[..low].iter().all(|&byte| byte == 0))` on the `Ok`
+arm, for any value of three or more cells with a nonzero cell above the low two.
+
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1198,9 +1198,6 @@
+     let mut number = 0u64;
+     let (whole, _) = value.as_chunks::<4>();
+     for cell in whole {
+-        if number >> 32 != 0 {
+-            return Err(Error::BadValue);
+-        }
+         // An add, not an or: the shift leaves the low 32 bits zero, so the two agree, and an add
+         // has no twin (`^` reads the same as `|` here) for a mutation run to report as alive.
+         number = (number << 32) + u64::from(u32::from_be_bytes(*cell));
