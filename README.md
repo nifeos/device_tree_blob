@@ -1,9 +1,9 @@
 # device_tree_blob
 
-[![check](https://github.com/nifeos/device_tree_blob/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nifeos/device_tree_blob/actions/workflows/ci.yml?query=branch%3Amain)
-[![proofs](https://github.com/nifeos/device_tree_blob/actions/workflows/proofs.yml/badge.svg?branch=main)](https://github.com/nifeos/device_tree_blob/actions/workflows/proofs.yml?query=branch%3Amain)
-[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/nifeos/device_tree_blob#license)
-[![minimum Rust version](https://img.shields.io/badge/rust-1.88%2B-blue.svg)](https://github.com/nifeos/device_tree_blob/blob/main/Cargo.toml)
+[![check](https://github.com/partsfoundry/device_tree_blob/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/partsfoundry/device_tree_blob/actions/workflows/ci.yml?query=branch%3Amain)
+[![proofs](https://github.com/partsfoundry/device_tree_blob/actions/workflows/proofs.yml/badge.svg?branch=main)](https://github.com/partsfoundry/device_tree_blob/actions/workflows/proofs.yml?query=branch%3Amain)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/partsfoundry/device_tree_blob#license)
+[![minimum Rust version](https://img.shields.io/badge/rust-1.88%2B-blue.svg)](https://github.com/partsfoundry/device_tree_blob/blob/main/Cargo.toml)
 
 A flattened device tree parser: bytes in, memory regions, register regions and property values out.
 The device tree blob is the machine describing itself, handed over by firmware (a bootloader, a Unified Extensible Firmware
@@ -130,7 +130,7 @@ Depend on it by git, pinned to a commit of this repository's `main` and never to
 
 ```toml
 [dependencies]
-device_tree_blob = { git = "https://github.com/nifeos/device_tree_blob", rev = "<full commit hash>" }
+device_tree_blob = { git = "https://github.com/partsfoundry/device_tree_blob", rev = "<full commit hash>" }
 ```
 
 Once a pre-release tag exists, use `tag = "<that tag>"` in place of `rev`.
