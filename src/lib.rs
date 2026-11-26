@@ -431,7 +431,8 @@ impl<'a> DeviceTreeBlob<'a> {
                     has_child[depth] = false;
                 }
                 Token::EndNode => {}
-                Token::Property { .. } => {
+                Token::Property { name, .. } => {
+                    name.read()?;
                     if depth == 0 || has_child[depth] {
                         return Err(Error::BadStructure);
                     }
@@ -560,11 +561,12 @@ impl<'a> DeviceTreeBlob<'a> {
                         declare_cells(name, value, &mut bus_address_cells, &mut bus_size_cells);
                     }
                     if depth == 2 {
-                        match name {
-                            b"reg" => register_value = Some(value),
-                            b"device_type" => typed_memory = value == b"memory\0",
-                            b"status" => available = value == b"okay\0" || value == b"ok\0",
-                            _ => {}
+                        if name.is(b"reg") {
+                            register_value = Some(value);
+                        } else if name.is(b"device_type") {
+                            typed_memory = value == b"memory\0";
+                        } else if name.is(b"status") {
+                            available = value == b"okay\0" || value == b"ok\0";
                         }
                     }
                 }
@@ -624,7 +626,7 @@ impl<'a> DeviceTreeBlob<'a> {
                         &mut bus_address_cells[depth],
                         &mut bus_size_cells[depth],
                     );
-                    if target_at == Some(depth) && name == b"reg" {
+                    if target_at == Some(depth) && name.is(b"reg") {
                         // A node's own `reg` uses its parent's cells, one level up.
                         return decode_regions(
                             value,
@@ -709,14 +711,14 @@ impl<'a> DeviceTreeBlob<'a> {
                         &mut bus_address_cells[depth],
                         &mut bus_size_cells[depth],
                     );
-                    if depth >= 2 && name == b"reg" {
+                    if depth >= 2 && name.is(b"reg") {
                         register_values[depth] = Some((
                             value,
                             bus_address_cells[depth - 1],
                             bus_size_cells[depth - 1],
                         ));
                     }
-                    if name == b"compatible" {
+                    if name.is(b"compatible") {
                         matched[depth] = lists_entry(value, compatible);
                     }
                 }
@@ -787,10 +789,10 @@ impl<'a> DeviceTreeBlob<'a> {
                     value,
                 } => {
                     // Two independent `if`s, so asking for `compatible` itself still answers.
-                    if property_name == name {
+                    if property_name.is(name) {
                         found[depth] = Some(value);
                     }
-                    if property_name == b"compatible" {
+                    if property_name.is(b"compatible") {
                         matched[depth] = lists_entry(value, compatible);
                     }
                 }
@@ -830,7 +832,7 @@ impl<'a> DeviceTreeBlob<'a> {
                     name: property_name,
                     value,
                 } => {
-                    if target_at == Some(depth) && property_name == name {
+                    if target_at == Some(depth) && property_name.is(name) {
                         return Ok(Some(value));
                     }
                 }
@@ -879,7 +881,7 @@ impl<'a> DeviceTreeBlob<'a> {
                     name: property_name,
                     value,
                 } => {
-                    if property_name == name {
+                    if property_name.is(name) {
                         values[depth] = Some(value);
                     }
                 }
@@ -924,10 +926,10 @@ impl<'a> DeviceTreeBlob<'a> {
                     name: property_name,
                     value,
                 } => {
-                    if property_name == name {
+                    if property_name.is(name) {
                         found[depth] = Some(value);
                     }
-                    if (property_name == b"phandle" || property_name == b"linux,phandle")
+                    if (property_name.is(b"phandle") || property_name.is(b"linux,phandle"))
                         && value.len() == 4
                         && be32(value, 0)? == pointer_handle
                     {
@@ -1003,7 +1005,7 @@ impl<'a> DeviceTreeBlob<'a> {
                     name: property_name,
                     value,
                 } => {
-                    if target_at == Some(depth) && property_name == name {
+                    if target_at == Some(depth) && property_name.is(name) {
                         // `matched` counts this node and is at most `out.len()`, so the slot exists.
                         if let Some(slot) = out.get_mut(matched - 1) {
                             *slot = Some(value);
@@ -1052,7 +1054,7 @@ impl<'a> DeviceTreeBlob<'a> {
                     if depth == 1 || (depth == 2 && in_reserved_memory) {
                         declare_cells(name, value, &mut bus_address_cells, &mut bus_size_cells);
                     }
-                    if depth == 3 && in_reserved_memory && name == b"reg" {
+                    if depth == 3 && in_reserved_memory && name.is(b"reg") {
                         let remaining = out.get_mut(found..).ok_or(Error::TooManyRegions)?;
                         found +=
                             decode_regions(value, bus_address_cells, bus_size_cells, remaining)?;
@@ -1091,10 +1093,10 @@ impl<'a> DeviceTreeBlob<'a> {
                 }
                 Token::Property { name, value } => {
                     if depth == 2 && in_chosen {
-                        match name {
-                            b"linux,initrd-start" => start = Some(integer(value)?),
-                            b"linux,initrd-end" => end = Some(integer(value)?),
-                            _ => {}
+                        if name.is(b"linux,initrd-start") {
+                            start = Some(integer(value)?);
+                        } else if name.is(b"linux,initrd-end") {
+                            end = Some(integer(value)?);
                         }
                     }
                 }
@@ -1137,7 +1139,7 @@ impl<'a> DeviceTreeBlob<'a> {
                     }
                 }
                 Token::Property { name, value } => {
-                    if depth == 2 && in_chosen && name == b"bootargs" {
+                    if depth == 2 && in_chosen && name.is(b"bootargs") {
                         let end = value.iter().position(|&b| b == 0).unwrap_or(value.len());
                         return Ok(Some(&value[..end]));
                     }
@@ -1190,13 +1192,13 @@ impl<'a> DeviceTreeBlob<'a> {
     /// read on into whatever follows the block. libfdt applies the bound from version 17; here it
     /// applies to every version, since `from_bytes` checks the block lies inside the blob for all
     /// of them, as libfdt's header check does.
-    fn property_name(&self, name_offset: usize) -> Result<&'a [u8], Error> {
+    fn property_name(&self, name_offset: usize) -> Result<PropertyName<'a>, Error> {
         if name_offset >= self.strings.len() {
             return Err(Error::Truncated);
         }
-        let rest = &self.strings[name_offset..];
-        let end = rest.iter().position(|&b| b == 0).ok_or(Error::BadValue)?;
-        Ok(&rest[..end])
+        Ok(PropertyName {
+            rest: &self.strings[name_offset..],
+        })
     }
 
     /// A node's name: the string at `at` in the structure block, which must end inside it.
@@ -1218,9 +1220,43 @@ enum Token<'a> {
     BeginNode { name: &'a [u8] },
     /// The node open at this depth closes.
     EndNode,
-    /// A property of the node open at this depth: its name from the strings block, and its value,
-    /// which lies inside the structure block.
-    Property { name: &'a [u8], value: &'a [u8] },
+    /// A property of the node open at this depth: where its name starts in the strings block, and
+    /// its value, which lies inside the structure block.
+    Property {
+        name: PropertyName<'a>,
+        value: &'a [u8],
+    },
+}
+
+/// A property's name, not yet read: the strings block from the name's first byte on.
+///
+/// The walk hands this out instead of the name, so a lookup that compares no property name never
+/// scans one for its terminator, and one that does compares only as many bytes as it wants.
+/// [`DeviceTreeBlob::from_bytes`] has read every name once, so each one ends inside the block.
+#[derive(Clone, Copy)]
+struct PropertyName<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> PropertyName<'a> {
+    /// Whether this is the name `wanted`: the same bytes, then the zero byte that ends the name.
+    /// A `wanted` with a zero byte in it is no name, and matches nothing.
+    fn is(self, wanted: &[u8]) -> bool {
+        self.rest.get(wanted.len()) == Some(&0)
+            && self.rest[..wanted.len()] == *wanted
+            && !wanted.contains(&0)
+    }
+
+    /// The name, up to its terminating zero byte; [`Error::BadValue`] when the strings block ends
+    /// first.
+    fn read(self) -> Result<&'a [u8], Error> {
+        let end = self
+            .rest
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or(Error::BadValue)?;
+        Ok(&self.rest[..end])
+    }
 }
 
 /// The one walk over the structure block that every lookup uses.
@@ -1279,14 +1315,19 @@ impl<'a> Tokens<'_, 'a> {
 /// Record a `#address-cells` or `#size-cells` declaration into the counts the node declares for
 /// its children. A declaration that is not exactly one cell is ignored, so the inherited width
 /// stands: a shorter value read as a cell would take the padding and the next token as the count.
-fn declare_cells(name: &[u8], value: &[u8], bus_address_cells: &mut u32, bus_size_cells: &mut u32) {
+fn declare_cells(
+    name: PropertyName<'_>,
+    value: &[u8],
+    bus_address_cells: &mut u32,
+    bus_size_cells: &mut u32,
+) {
     let Ok(cell) = <[u8; 4]>::try_from(value) else {
         return;
     };
-    match name {
-        b"#address-cells" => *bus_address_cells = u32::from_be_bytes(cell),
-        b"#size-cells" => *bus_size_cells = u32::from_be_bytes(cell),
-        _ => {}
+    if name.is(b"#address-cells") {
+        *bus_address_cells = u32::from_be_bytes(cell);
+    } else if name.is(b"#size-cells") {
+        *bus_size_cells = u32::from_be_bytes(cell);
     }
 }
 
