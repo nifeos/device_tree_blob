@@ -86,7 +86,8 @@ pub enum Error {
     BadValue,
     /// A token this parser does not recognize. The structure block is malformed.
     BadToken(u32),
-    /// The caller's output slice was too small to hold every region found.
+    /// The caller's output slice was too small to hold every region found, or, for
+    /// [`node_properties`](DeviceTreeBlob::node_properties), a value for every matching node.
     TooManyRegions,
     /// The structure block's nesting does not balance: a node closes when none is open, or the
     /// block's end token arrives while a node is still open.
@@ -858,8 +859,8 @@ impl<'a> DeviceTreeBlob<'a> {
     /// For a node that repeats, such as each hart's `cpu@` on a heterogeneous RISC-V machine like
     /// the JH7110, whose harts differ in their `riscv,isa`. `out[i]` is `None` when the *i*th match has no
     /// such property, which differs from there being no *i*th match. Returns the number of matching
-    /// **nodes**, which may exceed `out.len()`; the excess is counted and not written, so a caller
-    /// can tell it under-provisioned.
+    /// **nodes**, and refuses a full `out` with [`Error::TooManyRegions`], as the region lookups
+    /// refuse theirs: a caller never reads a short answer as the whole one.
     ///
     /// # Examples
     ///
@@ -875,7 +876,6 @@ impl<'a> DeviceTreeBlob<'a> {
     /// let tree = DeviceTreeBlob::from_bytes(blob)?;
     /// let mut isa = [None; 8];
     /// let harts = tree.node_properties(b"cpu", b"riscv,isa-base", &mut isa)?;
-    /// assert!(harts <= isa.len(), "more harts than slots: widen the array");
     /// assert_eq!(isa[..harts], [Some(&b"rv64i\0"[..])]);
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
@@ -900,6 +900,9 @@ impl<'a> DeviceTreeBlob<'a> {
             match token {
                 Token::BeginNode { name: node_name } => {
                     if depth >= 2 && target_at.is_none() && names_node(node, node_name) {
+                        if matched == out.len() {
+                            return Err(Error::TooManyRegions);
+                        }
                         target_at = Some(depth);
                         matched += 1;
                     }
@@ -913,11 +916,11 @@ impl<'a> DeviceTreeBlob<'a> {
                     name: property_name,
                     value,
                 } => {
-                    if target_at == Some(depth)
-                        && property_name == name
-                        && let Some(slot) = out.get_mut(matched - 1)
-                    {
-                        *slot = Some(value);
+                    if target_at == Some(depth) && property_name == name {
+                        // `matched` counts this node and is at most `out.len()`, so the slot exists.
+                        if let Some(slot) = out.get_mut(matched - 1) {
+                            *slot = Some(value);
+                        }
                     }
                 }
             }

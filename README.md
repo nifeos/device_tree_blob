@@ -50,8 +50,9 @@ Build a tree with `DeviceTreeBlob::from_bytes`, or with the crate's one `unsafe`
 A few behaviors a stranger may not expect:
 
 - Every lookup walks the structure block from its first token and holds nothing between calls.
-- Output goes into a caller's `&mut [Region]` and the count comes back, because the crate has no
-  allocator. A slice too short is `Error::TooManyRegions`, never a silent truncation.
+- Output goes into a caller's `&mut [Region]` (or, for `node_properties`, a slice of values) and
+  the count comes back, because the crate has no allocator. A slice too short is
+  `Error::TooManyRegions` for all six, never a silent truncation.
 - Cell widths come from the nearest ancestor that declares them, as Linux does, and not from the
   specification's default of 2 and 1. A reader that follows the specification returns a different
   region for a tree that is silent.

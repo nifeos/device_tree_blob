@@ -9,7 +9,7 @@
 //!     dtc -I dts -O dtb tests/fixtures/qemu-riscv64-virt.dts \
 //!         -o tests/fixtures/qemu-riscv64-virt.tree
 
-use device_tree_blob::{DeviceTreeBlob, Region};
+use device_tree_blob::{DeviceTreeBlob, Error, Region};
 
 const QEMU_RISCV_VIRT: &[u8] = include_bytes!("fixtures/qemu-riscv64-virt.dtb");
 
@@ -188,22 +188,33 @@ fn reads_a_property_from_every_matching_node() {
     );
 }
 
-/// **More matching nodes than slots is counted, not hidden.** A caller that under-provisions its
-/// array gets a count larger than the array and can say so, which is the difference between "this
-/// machine has four harts and I read two" and "this machine has two harts".
+/// **More matching nodes than slots is refused, not hidden.** A caller that under-provisions its
+/// array gets `TooManyRegions`, as the region lookups give it, rather than a count it must compare
+/// with the array to tell "this machine has eight virtio devices and I read two" from "this
+/// machine has two".
 #[test]
-fn more_nodes_than_slots_reports_the_real_count() {
+fn more_nodes_than_slots_is_refused() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
 
-    // Every `virtio_mmio@` node, into no space at all. The count is the honest one; nothing was
-    // written, because there was nowhere to write it.
     let mut none: [Option<&[u8]>; 0] = [];
-    let all = tree
-        .node_properties(b"virtio_mmio", b"compatible", &mut none)
-        .unwrap();
     assert_eq!(
-        all, 8,
-        "the tree has eight virtio nodes, and it said so with nowhere to put them"
+        tree.node_properties(b"virtio_mmio", b"compatible", &mut none),
+        Err(Error::TooManyRegions)
+    );
+    let mut seven = [None; 7];
+    assert_eq!(
+        tree.node_properties(b"virtio_mmio", b"compatible", &mut seven),
+        Err(Error::TooManyRegions)
+    );
+    let mut eight = [None; 8];
+    assert_eq!(
+        tree.node_properties(b"virtio_mmio", b"compatible", &mut eight),
+        Ok(8)
+    );
+    assert!(
+        eight
+            .iter()
+            .all(|value| value == &Some(&b"virtio,mmio\0"[..]))
     );
 }
 
