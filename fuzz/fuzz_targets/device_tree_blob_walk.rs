@@ -61,6 +61,31 @@ fuzz_target!(|data: &[u8]| {
         let _ = dtb.node_register_regions_compatible(compat, &mut out);
     }
 
+    // The general traversal. `from_bytes` accepted the blob, so each walk is total and they agree:
+    // every node `nodes` reaches is the root or some node's child, each property a node lists is
+    // one `property` finds, and `find_node` finds the root's children by their own names.
+    let mut through_children = 1usize;
+    for node in dtb.nodes() {
+        through_children += node.children().count();
+        for property in node.properties() {
+            assert!(node.property(property.name()).is_some());
+        }
+    }
+    assert_eq!(dtb.nodes().count(), through_children);
+    let root = dtb.root();
+    for child in root.children().take(8) {
+        let mut path = [0u8; 64];
+        let name = child.name();
+        if let Some(rest) = path.get_mut(1..=name.len()) {
+            rest.copy_from_slice(name);
+            path[0] = b'/';
+            let found = dtb.find_node(&path[..=name.len()]);
+            if !name.is_empty() && !name.contains(&b'/') {
+                assert!(found.is_some());
+            }
+        }
+    }
+
     // `Region::end()` is a `pub fn` on a `pub struct` whose fields came out of the blob, so it has
     // to hold on its own. Called on whatever the walkers actually produced rather than on invented
     // numbers, so a region the parser is willing to return is a region this is willing to add up.

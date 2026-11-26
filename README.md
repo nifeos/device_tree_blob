@@ -43,6 +43,7 @@ The same code runs as a doctest on `memory_regions` and `node_register_regions_c
 | The register regions of a node, by name or by `compatible` | `node_register_regions`, `node_register_regions_compatible` |
 | One property of a node | `node_property`, `node_property_inherited`, `node_property_compatible`, `parent_property_compatible`, `pointer_handle_property`, `node_properties` |
 | The `/chosen` node | `initial_ramdisk`, `boot_arguments` |
+| Any node, by path or by walking the tree, and its children and properties | `root`, `nodes`, `find_node`, then `Node::children`, `Node::properties`, `Node::property` |
 
 Build a tree with `DeviceTreeBlob::from_bytes`, or with the crate's one `unsafe` function,
 `DeviceTreeBlob::from_pointer`, when firmware hands over only an address.

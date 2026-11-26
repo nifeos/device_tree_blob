@@ -205,6 +205,10 @@ pub struct DeviceTreeBlob<'a> {
     /// found inside it and must end inside it, as libfdt's `fdt_get_string` reads one.
     strings: &'a [u8],
     reservations_offset: usize,
+    /// The root node: its name, and where its contents start in the structure block. `from_bytes`
+    /// finds it in its walk.
+    root_name: &'a [u8],
+    root_at: usize,
 }
 
 impl core::fmt::Debug for DeviceTreeBlob<'_> {
@@ -309,9 +313,9 @@ impl<'a> DeviceTreeBlob<'a> {
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, Error> {
-        let tree = Self::from_header(bytes)?;
+        let mut tree = Self::from_header(bytes)?;
         tree.check_reservations()?;
-        tree.check_structure()?;
+        (tree.root_name, tree.root_at) = tree.check_structure()?;
         Ok(tree)
     }
 
@@ -372,6 +376,8 @@ impl<'a> DeviceTreeBlob<'a> {
             reservations_offset: be32(bytes, 16)? as usize,
             bytes: &bytes[..total],
             structure: &bytes[..structure_end],
+            root_name: &[],
+            root_at: structure_start,
         };
 
         if tree.structure_offset >= total
@@ -411,21 +417,23 @@ impl<'a> DeviceTreeBlob<'a> {
     /// [`MAXIMUM_DEPTH`] ([`Error::TooDeep`]), and a shape the specification's section 5.4 rules
     /// out ([`Error::BadStructure`]): nesting that does not balance, no root node or a second one,
     /// a property outside every node, and a property after its node's first child.
-    fn check_structure(&self) -> Result<(), Error> {
+    ///
+    /// Returns the root node's name and where its contents start.
+    fn check_structure(&self) -> Result<(&'a [u8], usize), Error> {
         // Per open node: whether a child has opened inside it, after which no property of its
         // own may follow.
         let mut has_child = [false; DEPTH_SLOTS];
-        let mut roots = 0usize;
+        let mut root = None;
         let mut tokens = self.tokens();
 
         while let Some((depth, token)) = tokens.step()? {
             match token {
-                Token::BeginNode { .. } => {
+                Token::BeginNode { name } => {
                     if depth == 1 {
-                        if roots == 1 {
+                        if root.is_some() {
                             return Err(Error::BadStructure);
                         }
-                        roots = 1;
+                        root = Some((name, tokens.at));
                     }
                     has_child[depth - 1] = true;
                     has_child[depth] = false;
@@ -439,10 +447,7 @@ impl<'a> DeviceTreeBlob<'a> {
                 }
             }
         }
-        if roots == 0 {
-            return Err(Error::BadStructure);
-        }
-        Ok(())
+        root.ok_or(Error::BadStructure)
     }
 
     /// How many bytes the blob occupies. We need this to mark it as reserved: it is
@@ -1149,10 +1154,109 @@ impl<'a> DeviceTreeBlob<'a> {
         Ok(None)
     }
 
+    /// The root node, the one every other node lies below.
+    ///
+    /// [`from_bytes`](Self::from_bytes) found it, so this reads nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let root = tree.root();
+    /// assert_eq!(root.name(), b"");
+    /// assert_eq!(root.property(b"model"), Some(&b"riscv-virtio,qemu\0"[..]));
+    /// assert!(root.children().any(|child| child.name() == b"chosen"));
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
+    pub fn root(&self) -> Node<'a> {
+        Node {
+            tree: *self,
+            name: self.root_name,
+            contents_at: self.root_at,
+            depth: 1,
+        }
+    }
+
+    /// Every node of the tree, the root first, in the order the blob holds them: each node before
+    /// its children, and its children before its next sibling. libfdt's `fdt_next_node` walks
+    /// the same order.
+    ///
+    /// # Examples
+    ///
+    /// Every node whose `status` is `okay`:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let enabled = tree
+    ///     .nodes()
+    ///     .filter(|node| node.property(b"status") == Some(b"okay\0"))
+    ///     .count();
+    /// assert_eq!(tree.nodes().next().map(|root| root.name()), Some(&b""[..]));
+    /// assert!(enabled <= tree.nodes().count());
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
+    pub fn nodes(&self) -> Nodes<'a> {
+        Nodes {
+            tokens: Some(self.tokens()),
+        }
+    }
+
+    /// The node at `path`, such as `b"/soc/serial@10000000"`; `None` when no node is there.
+    ///
+    /// A path starts with `/`, which alone names the root, and names one node per component below
+    /// it. Each component names a child as the lookups by name do: its whole name, or, when the
+    /// component carries no unit address, its name before one, so `b"/soc/serial"` finds
+    /// `/soc/serial@10000000`. The first child that matches is taken. A path that does not start
+    /// with `/`, or has an empty component (`b"//soc"`, `b"/soc/"`), names no node. Aliases are
+    /// not resolved.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let serial = tree.find_node(b"/soc/serial@10000000").expect("QEMU's UART");
+    /// assert_eq!(serial.property(b"compatible"), Some(&b"ns16550a\0"[..]));
+    /// assert_eq!(tree.find_node(b"/soc/serial").map(|node| node.name()), Some(serial.name()));
+    /// assert!(tree.find_node(b"/").is_some());
+    /// assert!(tree.find_node(b"soc").is_none());
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
+    pub fn find_node(&self, path: &[u8]) -> Option<Node<'a>> {
+        let below_root = path.strip_prefix(b"/")?;
+        let mut node = self.root();
+        if below_root.is_empty() {
+            return Some(node);
+        }
+        for component in below_root.split(|&b| b == b'/') {
+            node = node
+                .children()
+                .find(|child| names_node(component, child.name))?;
+        }
+        Some(node)
+    }
+
     /// A walk over the structure block's tokens, from its first.
-    fn tokens(&self) -> Tokens<'_, 'a> {
+    fn tokens(&self) -> Tokens<'a> {
         Tokens {
-            tree: self,
+            tree: *self,
             at: self.structure_offset,
             depth: 0,
         }
@@ -1208,6 +1312,252 @@ impl<'a> DeviceTreeBlob<'a> {
         Ok(&rest[..end])
     }
 }
+
+/// One node of the tree: a handle to where it lies in the blob, which reads nothing until asked.
+///
+/// [`DeviceTreeBlob::root`], [`DeviceTreeBlob::nodes`], [`DeviceTreeBlob::find_node`] and
+/// [`Node::children`] hand one out. It is `Copy` and borrows the blob, as the tree does, and every
+/// walk from it finds only what [`DeviceTreeBlob::from_bytes`] accepted, so none of its methods
+/// fails.
+#[derive(Clone, Copy)]
+pub struct Node<'a> {
+    tree: DeviceTreeBlob<'a>,
+    name: &'a [u8],
+    /// Where the node's properties start, just after its name.
+    contents_at: usize,
+    /// The node's own depth: 1 for the root.
+    depth: usize,
+}
+
+impl core::fmt::Debug for Node<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Node")
+            .field("name", &self.name.escape_ascii())
+            .field("depth", &self.depth)
+            .field("contents_offset", &self.contents_at)
+            .finish()
+    }
+}
+
+impl<'a> Node<'a> {
+    /// The node's name, unit address included: `b"serial@10000000"`, or `b""` for the root.
+    pub fn name(&self) -> &'a [u8] {
+        self.name
+    }
+
+    /// The raw value of the node's own property `name`; `None` when the node has none. Nothing is
+    /// inherited from a parent.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let chosen = tree.find_node(b"/chosen").expect("QEMU writes /chosen");
+    /// assert!(chosen.property(b"stdout-path").is_some());
+    /// assert_eq!(chosen.property(b"no-such-property"), None);
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
+    pub fn property(&self, name: &[u8]) -> Option<&'a [u8]> {
+        let mut tokens = self.walk();
+        while let Ok(Some((depth, Token::Property { name: found, value }))) = tokens.step() {
+            if depth == self.depth && found.is(name) {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// The node's own properties, in the order the blob holds them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let root = tree.root();
+    /// assert!(root.properties().any(|property| property.name() == b"#address-cells"));
+    /// for property in root.properties() {
+    ///     assert!(!property.name().is_empty());
+    /// }
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
+    pub fn properties(&self) -> Properties<'a> {
+        Properties {
+            tokens: Some(self.walk()),
+            depth: self.depth,
+        }
+    }
+
+    /// The node's children, in the order the blob holds them; their own children are not visited.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let cpus = tree.find_node(b"/cpus").expect("QEMU writes /cpus");
+    /// let harts = cpus
+    ///     .children()
+    ///     .filter(|child| child.property(b"device_type") == Some(b"cpu\0"))
+    ///     .count();
+    /// assert!(harts >= 1);
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
+    pub fn children(&self) -> Children<'a> {
+        Children {
+            tokens: Some(self.walk()),
+            depth: self.depth,
+        }
+    }
+
+    /// A walk over the node's contents, from its first property.
+    fn walk(&self) -> Tokens<'a> {
+        Tokens {
+            tree: self.tree,
+            at: self.contents_at,
+            depth: self.depth,
+        }
+    }
+}
+
+/// One property of a node: its name and its raw value, as the blob holds them.
+///
+/// [`Node::properties`] hands these out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Property<'a> {
+    name: &'a [u8],
+    value: &'a [u8],
+}
+
+impl<'a> Property<'a> {
+    /// The property's name, from the strings block: `b"compatible"`.
+    pub fn name(&self) -> &'a [u8] {
+        self.name
+    }
+
+    /// The property's raw value, which may be empty: a property with no value is a flag.
+    pub fn value(&self) -> &'a [u8] {
+        self.value
+    }
+}
+
+/// Every node of a tree, in the order the blob holds them; [`DeviceTreeBlob::nodes`].
+#[derive(Clone, Debug)]
+pub struct Nodes<'a> {
+    /// `None` once the walk has ended.
+    tokens: Option<Tokens<'a>>,
+}
+
+impl<'a> Iterator for Nodes<'a> {
+    type Item = Node<'a>;
+
+    fn next(&mut self) -> Option<Node<'a>> {
+        let tokens = self.tokens.as_mut()?;
+        loop {
+            match tokens.step() {
+                Ok(Some((depth, Token::BeginNode { name }))) => {
+                    return Some(Node {
+                        tree: tokens.tree,
+                        name,
+                        contents_at: tokens.at,
+                        depth,
+                    });
+                }
+                Ok(Some(_)) => {}
+                // `from_bytes` walked the same tokens, so the walk meets no error; one would end
+                // it.
+                Ok(None) | Err(_) => {
+                    self.tokens = None;
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+impl core::iter::FusedIterator for Nodes<'_> {}
+
+/// The children of one node; [`Node::children`].
+#[derive(Clone, Debug)]
+pub struct Children<'a> {
+    /// `None` once the node has closed.
+    tokens: Option<Tokens<'a>>,
+    /// The parent's depth.
+    depth: usize,
+}
+
+impl<'a> Iterator for Children<'a> {
+    type Item = Node<'a>;
+
+    fn next(&mut self) -> Option<Node<'a>> {
+        let tokens = self.tokens.as_mut()?;
+        loop {
+            match tokens.step() {
+                Ok(Some((depth, Token::BeginNode { name }))) if depth == self.depth + 1 => {
+                    return Some(Node {
+                        tree: tokens.tree,
+                        name,
+                        contents_at: tokens.at,
+                        depth,
+                    });
+                }
+                Ok(Some((depth, Token::EndNode))) if depth == self.depth => break,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+        self.tokens = None;
+        None
+    }
+}
+
+impl core::iter::FusedIterator for Children<'_> {}
+
+/// The properties of one node; [`Node::properties`].
+#[derive(Clone, Debug)]
+pub struct Properties<'a> {
+    /// `None` once the node's properties have ended.
+    tokens: Option<Tokens<'a>>,
+    /// The node's depth.
+    depth: usize,
+}
+
+impl<'a> Iterator for Properties<'a> {
+    type Item = Property<'a>;
+
+    fn next(&mut self) -> Option<Property<'a>> {
+        let tokens = self.tokens.as_mut()?;
+        // A node's properties come before its first child, as `from_bytes` checked, so the first
+        // token that is not a property of this node ends them.
+        if let Ok(Some((depth, Token::Property { name, value }))) = tokens.step()
+            && depth == self.depth
+            && let Ok(name) = name.read()
+        {
+            return Some(Property { name, value });
+        }
+        self.tokens = None;
+        None
+    }
+}
+
+impl core::iter::FusedIterator for Properties<'_> {}
 
 /// One slot per depth a walk can reach, and one for depth 0 above the root, so a per-depth stack
 /// indexed by a depth [`Tokens`] hands out is never out of bounds.
@@ -1265,14 +1615,15 @@ impl<'a> PropertyName<'a> {
 /// never leaves the structure block, the nesting balances, and it never goes deeper than
 /// [`MAXIMUM_DEPTH`]. So a depth it hands out is between 0 and `MAXIMUM_DEPTH`, and a node's depth
 /// is at least 1. libfdt's `fdt_next_tag` is the same shape.
-struct Tokens<'t, 'a> {
-    tree: &'t DeviceTreeBlob<'a>,
+#[derive(Clone, Debug)]
+struct Tokens<'a> {
+    tree: DeviceTreeBlob<'a>,
     at: usize,
     /// How many nodes are open.
     depth: usize,
 }
 
-impl<'a> Tokens<'_, 'a> {
+impl<'a> Tokens<'a> {
     /// The next token, with the depth of the node it belongs to; `Ok(None)` at `FDT_END`.
     fn step(&mut self) -> Result<Option<(usize, Token<'a>)>, Error> {
         loop {
