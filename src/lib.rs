@@ -48,8 +48,9 @@ pub enum Error {
     /// The blob claims a version this parser does not read: its `last_compatible_version` is above 17.
     UnsupportedVersion(u32),
     /// The blob, or one of its blocks, ends before something it must hold: an offset in the header
-    /// points outside the blob, a property's value runs past the structure block, or the walk
-    /// reaches the end of the structure block without its end token.
+    /// points outside the blob, the strings block runs past the blob's end, a property's name
+    /// offset lies past the strings block, a property's value runs past the structure block, or the
+    /// walk reaches the end of the structure block without its end token.
     Truncated,
     /// A value has the wrong shape for what it holds: an integer property that is neither 4 nor 8
     /// bytes long, a node or property name with no terminating zero byte inside its block, or a `reg`
@@ -170,6 +171,9 @@ pub struct DeviceTreeBlob<'a> {
     structure: &'a [u8],
     structure_offset: usize,
     strings_offset: usize,
+    /// The strings block alone, `size_dt_strings` bytes from `off_dt_strings`. A property's name is
+    /// found inside it and must end inside it, as libfdt's `fdt_get_string` reads one.
+    strings: &'a [u8],
     reservations_offset: usize,
 }
 
@@ -214,8 +218,8 @@ impl<'a> DeviceTreeBlob<'a> {
     /// read into a larger buffer parses as itself. [`MAXIMUM_TOTAL_SIZE_BYTES`] bounds
     /// [`from_pointer`](Self::from_pointer) only: a slice in hand is already as long as it is. The header's
     /// `version` decides where the structure block ends (`size_dt_struct` from version 17, the
-    /// strings block before it), and a `last_compatible_version` above 17 is refused. `size_dt_strings`
-    /// and `boot_cpuid_phys` are not read; a name in the strings block is bounded by the blob's end.
+    /// strings block before it), and a `last_compatible_version` above 17 is refused. The strings
+    /// block (`size_dt_strings` bytes) must lie inside the blob; `boot_cpuid_phys` is not read.
     ///
     /// # Examples
     ///
@@ -269,9 +273,21 @@ impl<'a> DeviceTreeBlob<'a> {
             return Err(Error::Truncated);
         }
 
+        // The strings block must lie inside the blob, as libfdt's `fdt_check_header` requires of
+        // every version. Every property name is looked up inside it and nowhere else.
+        let strings_end = strings_offset
+            .checked_add(be32(bytes, 32)? as usize)
+            .ok_or(Error::Truncated)?;
+        if strings_end > total {
+            return Err(Error::Truncated);
+        }
+
         let tree = DeviceTreeBlob {
             structure_offset: structure_start,
             strings_offset,
+            strings: bytes
+                .get(strings_offset..strings_end)
+                .ok_or(Error::Truncated)?,
             reservations_offset: be32(bytes, 16)? as usize,
             bytes: &bytes[..total],
             structure: &bytes[..structure_end],
@@ -1010,25 +1026,28 @@ impl<'a> DeviceTreeBlob<'a> {
         })
     }
 
-    /// A property's name: the string at `name_offset` in the strings block.
+    /// A property's name: the string at `name_offset` in the strings block, which must start and
+    /// end inside it.
+    ///
+    /// The rules are libfdt's `fdt_get_string`: an offset at or past `size_dt_strings` is refused
+    /// (there `FDT_ERR_BADOFFSET`, here [`Error::Truncated`]), and the search for the terminating
+    /// zero byte stops at the block's end, so a name with no terminator inside the block is refused
+    /// ([`Error::BadValue`], as a node name with none inside the structure block is) rather than
+    /// read on into whatever follows the block. libfdt applies the bound from version 17; here it
+    /// applies to every version, since `from_bytes` checks the block lies inside the blob for all
+    /// of them, as libfdt's header check does.
     fn property_name(&self, name_offset: usize) -> Result<&'a [u8], Error> {
-        self.terminated_string(
-            self.strings_offset
-                .checked_add(name_offset)
-                .ok_or(Error::Truncated)?,
-        )
+        if name_offset >= self.strings.len() {
+            return Err(Error::Truncated);
+        }
+        let rest = &self.strings[name_offset..];
+        let end = rest.iter().position(|&b| b == 0).ok_or(Error::BadValue)?;
+        Ok(&rest[..end])
     }
 
     /// A node's name: the string at `at` in the structure block, which must end inside it.
     fn node_name(&self, at: usize) -> Result<&'a [u8], Error> {
         let rest = self.structure.get(at..).ok_or(Error::Truncated)?;
-        let end = rest.iter().position(|&b| b == 0).ok_or(Error::BadValue)?;
-        Ok(&rest[..end])
-    }
-
-    /// A null-terminated string in the blob, returned without its terminator.
-    fn terminated_string(&self, at: usize) -> Result<&'a [u8], Error> {
-        let rest = self.bytes.get(at..).ok_or(Error::Truncated)?;
         let end = rest.iter().position(|&b| b == 0).ok_or(Error::BadValue)?;
         Ok(&rest[..end])
     }
