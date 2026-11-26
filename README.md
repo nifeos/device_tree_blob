@@ -21,13 +21,13 @@ use device_tree_blob::{DeviceTreeBlob, Region};
 let blob = include_bytes!("tests/fixtures/qemu-riscv64-virt.dtb");
 let tree = DeviceTreeBlob::from_bytes(blob)?;
 
-let mut ram = [Region { start: 0, size_bytes: 0 }; 4];
+let mut ram = [Region::default(); 4];
 let banks = tree.memory_regions(&mut ram)?;
-assert_eq!(&ram[..banks], [Region { start: 0x8000_0000, size_bytes: 0x800_0000 }]);
+assert_eq!(&ram[..banks], [Region::new(0x8000_0000, 0x800_0000)]);
 
-let mut rtc = [Region { start: 0, size_bytes: 0 }; 1];
+let mut rtc = [Region::default(); 1];
 let found = tree.node_register_regions_compatible(b"google,goldfish-rtc", &mut rtc)?;
-assert_eq!(&rtc[..found], [Region { start: 0x10_1000, size_bytes: 0x1000 }]);
+assert_eq!(&rtc[..found], [Region::new(0x10_1000, 0x1000)]);
 # Ok::<(), device_tree_blob::Error>(())
 ```
 

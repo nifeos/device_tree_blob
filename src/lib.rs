@@ -13,7 +13,13 @@
 #![no_std]
 
 /// A contiguous span of physical memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ordered by `start`, then by `size_bytes`, so a sorted memory map lists its regions by address.
+///
+/// The fields are public to read. The type is `#[non_exhaustive]`, so a later field (the node a
+/// region came from, say) breaks no caller; build one with [`Region::new`] or [`Region::default`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct Region {
     /// The physical address of the first byte.
     pub start: u64,
@@ -22,9 +28,29 @@ pub struct Region {
 }
 
 impl Region {
+    /// A region of `size_bytes` bytes from `start`.
+    ///
+    /// The type is `#[non_exhaustive]`, so a caller outside the crate builds one here, or takes
+    /// [`Region::default`] (zero bytes at address zero) to fill an output array. Nothing is checked:
+    /// a region whose end wraps is representable, and [`end`](Self::end) saturates for it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use device_tree_blob::Region;
+    ///
+    /// let uart = Region::new(0x1000_0000, 0x100);
+    /// assert_eq!(uart.end(), 0x1000_0100);
+    /// let mut out = [Region::default(); 8];
+    /// out[0] = uart;
+    /// ```
+    pub const fn new(start: u64, size_bytes: u64) -> Self {
+        Region { start, size_bytes }
+    }
+
     /// One past the last byte, **saturating**.
     ///
-    /// Saturating because the type is `pub` with `pub` fields, so anyone can build one whose
+    /// Saturating because anyone can build one with [`Region::new`] whose
     /// `start + size_bytes` wraps, and a caller placing an allocator over every RAM region may call this
     /// before it can report a failure; a plain add would panic there under overflow checks
     /// (regression in `tests/hostile.rs`). A saturated end is still wrong, so the parser refuses a
@@ -39,7 +65,7 @@ impl Region {
 /// Each fault has its own variant, as libfdt separates `FDT_ERR_TRUNCATED`, `FDT_ERR_BADVALUE` and
 /// `FDT_ERR_BADSTRUCTURE`, so a caller printing the error at boot names the fault the firmware made.
 /// The enum is `#[non_exhaustive]`: a later fault gets its own variant without breaking a caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Error {
     /// The first four bytes were not `0xd00dfeed`. Either the pointer is wrong or the
@@ -163,7 +189,10 @@ fn be64(bytes: &[u8], at: usize) -> Result<u64, Error> {
 /// a tree whose nesting does not balance ([`Error::BadStructure`]), one nested deeper than
 /// [`MAXIMUM_DEPTH`] ([`Error::TooDeep`]), and a structure block that ends before its end token
 /// ([`Error::Truncated`]). A lookup that finds its answer first returns it without walking on.
-#[derive(Debug)]
+///
+/// The tree is `Copy`: it is a borrow of the blob and a few offsets, so two consumers can each hold
+/// one. Its `Debug` prints the total size and the block offsets, never the blob's bytes.
+#[derive(Clone, Copy)]
 pub struct DeviceTreeBlob<'a> {
     bytes: &'a [u8],
     /// The structure block alone, as the prefix of the blob that ends where the block does, so an
@@ -177,6 +206,23 @@ pub struct DeviceTreeBlob<'a> {
     reservations_offset: usize,
 }
 
+impl core::fmt::Debug for DeviceTreeBlob<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("DeviceTreeBlob")
+            .field("total_size", &self.bytes.len())
+            .field("structure_offset", &self.structure_offset)
+            .field(
+                "structure_size",
+                &self.structure.len().saturating_sub(self.structure_offset),
+            )
+            .field("strings_offset", &self.strings_offset)
+            .field("strings_size", &self.strings.len())
+            .field("reservations_offset", &self.reservations_offset)
+            .finish()
+    }
+}
+
 impl<'a> DeviceTreeBlob<'a> {
     /// Parse the blob at `pointer`, whose length the blob's own header gives.
     ///
@@ -186,9 +232,16 @@ impl<'a> DeviceTreeBlob<'a> {
     ///
     /// # Safety
     ///
-    /// `pointer` must point at a device tree blob that stays valid for `'a`. The 8 bytes are read
-    /// before anything is validated, which is the one leap of faith: a wrong pointer almost
-    /// certainly fails the magic check that follows.
+    /// `pointer` must point at a device tree blob, and for the whole of `'a`:
+    ///
+    /// - the blob's first 8 bytes, and then the `totalsize` bytes its header declares (at most
+    ///   [`MAXIMUM_TOTAL_SIZE_BYTES`]), must be readable memory, one allocation or mapping from
+    ///   `pointer` on;
+    /// - nothing may write to those bytes, neither this program nor a device nor other firmware,
+    ///   since the tree hands out `&'a [u8]` borrows of them.
+    ///
+    /// The 8 bytes are read before anything is validated, which is the one leap of faith: a wrong
+    /// pointer almost certainly fails the magic check that follows, but an unreadable one faults.
     #[doc(alias = "from_ptr")]
     pub unsafe fn from_pointer(pointer: *const u8) -> Result<Self, Error> {
         // Read just enough to learn how long the thing claims to be.
@@ -368,9 +421,9 @@ impl<'a> DeviceTreeBlob<'a> {
     ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
     /// ));
     /// let tree = DeviceTreeBlob::from_bytes(blob)?;
-    /// let mut ram = [Region { start: 0, size_bytes: 0 }; 4];
+    /// let mut ram = [Region::default(); 4];
     /// let banks = tree.memory_regions(&mut ram)?;
-    /// assert_eq!(&ram[..banks], [Region { start: 0x8000_0000, size_bytes: 0x800_0000 }]);
+    /// assert_eq!(&ram[..banks], [Region::new(0x8000_0000, 0x800_0000)]);
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
     pub fn memory_regions(&self, out: &mut [Region]) -> Result<usize, Error> {
@@ -515,9 +568,9 @@ impl<'a> DeviceTreeBlob<'a> {
     ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
     /// ));
     /// let tree = DeviceTreeBlob::from_bytes(blob)?;
-    /// let mut rtc = [Region { start: 0, size_bytes: 0 }; 1];
+    /// let mut rtc = [Region::default(); 1];
     /// let found = tree.node_register_regions_compatible(b"google,goldfish-rtc", &mut rtc)?;
-    /// assert_eq!(&rtc[..found], [Region { start: 0x10_1000, size_bytes: 0x1000 }]);
+    /// assert_eq!(&rtc[..found], [Region::new(0x10_1000, 0x1000)]);
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
     #[doc(alias = "reg")]

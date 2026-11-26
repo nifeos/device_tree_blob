@@ -16,19 +16,14 @@ const QEMU_RISCV_VIRT: &[u8] = include_bytes!("fixtures/qemu-riscv64-virt.dtb");
 #[test]
 fn finds_the_ram() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regions = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 8];
+    let mut regions = [Region::default(); 8];
     let n = tree.memory_regions(&mut regions).unwrap();
 
     assert_eq!(n, 1, "riscv virt has one memory node");
     assert_eq!(
         regions[0],
-        Region {
-            start: 0x8000_0000,     // riscv virt's RAM base, not aarch64's 0x4000_0000
-            size_bytes: 0x800_0000, // 128 MiB, QEMU's default
-        }
+        // riscv virt's RAM base, not aarch64's 0x4000_0000, and 128 MiB, QEMU's default.
+        Region::new(0x8000_0000, 0x800_0000)
     );
 }
 
@@ -39,20 +34,11 @@ fn finds_the_ram() {
 #[test]
 fn finds_the_plic_nested_under_soc() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regions = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 4];
+    let mut regions = [Region::default(); 4];
     let n = tree.node_register_regions(b"plic@", &mut regions).unwrap();
 
     assert_eq!(n, 1, "the PLIC has one register block (the GIC has two)");
-    assert_eq!(
-        regions[0],
-        Region {
-            start: 0xc00_0000,
-            size_bytes: 0x60_0000,
-        }
-    );
+    assert_eq!(regions[0], Region::new(0xc00_0000, 0x60_0000));
 }
 
 /// **A property, found by binding rather than by label.** `node_property_compatible` exists because
@@ -125,27 +111,12 @@ fn finds_the_parent_of_a_compatible_node() {
 #[test]
 fn finds_opensbis_reserved_memory() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regions = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 8];
+    let mut regions = [Region::default(); 8];
     let n = tree.reserved_memory_regions(&mut regions).unwrap();
 
     assert_eq!(n, 2, "OpenSBI reserves two regions on virt");
-    assert_eq!(
-        regions[0],
-        Region {
-            start: 0x8000_0000,
-            size_bytes: 0x4_0000,
-        }
-    );
-    assert_eq!(
-        regions[1],
-        Region {
-            start: 0x8004_0000,
-            size_bytes: 0x4_0000,
-        }
-    );
+    assert_eq!(regions[0], Region::new(0x8000_0000, 0x4_0000));
+    assert_eq!(regions[1], Region::new(0x8004_0000, 0x4_0000));
 }
 
 /// **The RTC, found by binding rather than by label**. The twin of the aarch64
@@ -154,23 +125,14 @@ fn finds_opensbis_reserved_memory() {
 #[test]
 fn finds_the_rtc_by_compatible() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regs = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 2];
+    let mut regs = [Region::default(); 2];
 
     assert_eq!(
         tree.node_register_regions_compatible(b"google,goldfish-rtc", &mut regs)
             .unwrap(),
         1
     );
-    assert_eq!(
-        regs[0],
-        Region {
-            start: 0x0010_1000,
-            size_bytes: 0x1000,
-        }
-    );
+    assert_eq!(regs[0], Region::new(0x0010_1000, 0x1000));
 }
 
 /// And the real-time clock is not on this board. Both boots probe for both devices, so both absences are
@@ -178,10 +140,7 @@ fn finds_the_rtc_by_compatible() {
 #[test]
 fn the_pl031_is_absent_on_riscv() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regs = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 2];
+    let mut regs = [Region::default(); 2];
     assert_eq!(
         tree.node_register_regions_compatible(b"arm,pl031", &mut regs)
             .unwrap(),
