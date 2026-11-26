@@ -21,7 +21,7 @@ fuzz_target!(|data: &[u8]| {
     // Small on purpose. A caller in the kernel passes a fixed array off its own stack, so the
     // interesting paths are the ones where the output runs out and the parser has to say
     // `TooManyRegions` instead of writing past the end.
-    let mut out = [Region { start: 0, size_bytes: 0 }; 8];
+    let mut out = [Region::default(); 8];
 
     let _ = dtb.total_size();
     let _ = dtb.memory_reservations(&mut out);
@@ -29,24 +29,23 @@ fuzz_target!(|data: &[u8]| {
     let _ = dtb.reserved_memory_regions(&mut out);
     let _ = dtb.initial_ramdisk();
 
-    // The three lookups that take a caller-supplied needle, with the arch layer's real needles
-    // (`intc`/`plic`, `pl031`/`goldfish-rtc`, `virtio_mmio`). The empty prefix reaches the decode
-    // path cheapest, since it matches the first node at depth >= 2, and for that reason it cannot
-    // reach the deep-nesting bug: matching stops at the first candidate.
-    for prefix in [&b""[..], b"intc", b"plic", b"memory", b"virtio_mmio"] {
-        let _ = dtb.node_register_regions(prefix, &mut out);
-        let _ = dtb.node_property(prefix, b"reg");
-        let _ = dtb.node_property(prefix, b"compatible");
+    // The lookups that take a caller-supplied node name, with real names (`intc`/`plic`,
+    // `pl031`/`goldfish-rtc`, `virtio_mmio`). The one-letter `a` is the name a fuzzer reaches
+    // cheapest, which takes the walk to the decode path.
+    for node in [&b"a"[..], b"intc", b"plic", b"memory", b"virtio_mmio"] {
+        let _ = dtb.node_register_regions(node, &mut out);
+        let _ = dtb.node_property(node, b"reg");
+        let _ = dtb.node_property(node, b"compatible");
         // The inherited variant keeps a per-depth value stack the blob's nesting indexes, which is
         // the same shape as the `node_register_regions` cell stacks this target already caught a real
         // out-of-bounds in. `interrupts` beside `interrupt-parent` because that pair is the
         // kernel's real read (the console UART's line).
-        let _ = dtb.node_property_inherited(prefix, b"interrupt-parent");
-        let _ = dtb.node_property(prefix, b"interrupts");
+        let _ = dtb.node_property_inherited(node, b"interrupt-parent");
+        let _ = dtb.node_property(node, b"interrupts");
     }
     // The phandle walk: whatever `interrupt-parent` bytes the blob offers, followed, plus a
     // constant needle so the walk runs even when the property is absent.
-    if let Ok(Some(parent)) = dtb.node_property_inherited(b"", b"interrupt-parent")
+    if let Ok(Some(parent)) = dtb.node_property_inherited(b"a", b"interrupt-parent")
         && parent.len() >= 4
     {
         let ph = u32::from_be_bytes([parent[0], parent[1], parent[2], parent[3]]);
@@ -60,6 +59,31 @@ fuzz_target!(|data: &[u8]| {
         b"riscv,plic0",
     ] {
         let _ = dtb.node_register_regions_compatible(compat, &mut out);
+    }
+
+    // The general traversal. `from_bytes` accepted the blob, so each walk is total and they agree:
+    // every node `nodes` reaches is the root or some node's child, each property a node lists is
+    // one `property` finds, and `find_node` finds the root's children by their own names.
+    let mut through_children = 1usize;
+    for node in dtb.nodes() {
+        through_children += node.children().count();
+        for property in node.properties() {
+            assert!(node.property(property.name()).is_some());
+        }
+    }
+    assert_eq!(dtb.nodes().count(), through_children);
+    let root = dtb.root();
+    for child in root.children().take(8) {
+        let mut path = [0u8; 64];
+        let name = child.name();
+        if let Some(rest) = path.get_mut(1..=name.len()) {
+            rest.copy_from_slice(name);
+            path[0] = b'/';
+            let found = dtb.find_node(&path[..=name.len()]);
+            if !name.is_empty() && !name.contains(&b'/') {
+                assert!(found.is_some());
+            }
+        }
     }
 
     // `Region::end()` is a `pub fn` on a `pub struct` whose fields came out of the blob, so it has

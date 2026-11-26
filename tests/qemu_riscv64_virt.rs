@@ -9,26 +9,21 @@
 //!     dtc -I dts -O dtb tests/fixtures/qemu-riscv64-virt.dts \
 //!         -o tests/fixtures/qemu-riscv64-virt.tree
 
-use device_tree_blob::{DeviceTreeBlob, Region};
+use device_tree_blob::{DeviceTreeBlob, Error, Region};
 
 const QEMU_RISCV_VIRT: &[u8] = include_bytes!("fixtures/qemu-riscv64-virt.dtb");
 
 #[test]
 fn finds_the_ram() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regions = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 8];
+    let mut regions = [Region::default(); 8];
     let n = tree.memory_regions(&mut regions).unwrap();
 
     assert_eq!(n, 1, "riscv virt has one memory node");
     assert_eq!(
         regions[0],
-        Region {
-            start: 0x8000_0000,     // riscv virt's RAM base, not aarch64's 0x4000_0000
-            size_bytes: 0x800_0000, // 128 MiB, QEMU's default
-        }
+        // riscv virt's RAM base, not aarch64's 0x4000_0000, and 128 MiB, QEMU's default.
+        Region::new(0x8000_0000, 0x800_0000)
     );
 }
 
@@ -39,20 +34,11 @@ fn finds_the_ram() {
 #[test]
 fn finds_the_plic_nested_under_soc() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regions = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 4];
-    let n = tree.node_register_regions(b"plic@", &mut regions).unwrap();
+    let mut regions = [Region::default(); 4];
+    let n = tree.node_register_regions(b"plic", &mut regions).unwrap();
 
     assert_eq!(n, 1, "the PLIC has one register block (the GIC has two)");
-    assert_eq!(
-        regions[0],
-        Region {
-            start: 0xc00_0000,
-            size_bytes: 0x60_0000,
-        }
-    );
+    assert_eq!(regions[0], Region::new(0xc00_0000, 0x60_0000));
 }
 
 /// **A property, found by binding rather than by label.** `node_property_compatible` exists because
@@ -125,27 +111,12 @@ fn finds_the_parent_of_a_compatible_node() {
 #[test]
 fn finds_opensbis_reserved_memory() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regions = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 8];
+    let mut regions = [Region::default(); 8];
     let n = tree.reserved_memory_regions(&mut regions).unwrap();
 
     assert_eq!(n, 2, "OpenSBI reserves two regions on virt");
-    assert_eq!(
-        regions[0],
-        Region {
-            start: 0x8000_0000,
-            size_bytes: 0x4_0000,
-        }
-    );
-    assert_eq!(
-        regions[1],
-        Region {
-            start: 0x8004_0000,
-            size_bytes: 0x4_0000,
-        }
-    );
+    assert_eq!(regions[0], Region::new(0x8000_0000, 0x4_0000));
+    assert_eq!(regions[1], Region::new(0x8004_0000, 0x4_0000));
 }
 
 /// **The RTC, found by binding rather than by label**. The twin of the aarch64
@@ -154,23 +125,14 @@ fn finds_opensbis_reserved_memory() {
 #[test]
 fn finds_the_rtc_by_compatible() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regs = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 2];
+    let mut regs = [Region::default(); 2];
 
     assert_eq!(
         tree.node_register_regions_compatible(b"google,goldfish-rtc", &mut regs)
             .unwrap(),
         1
     );
-    assert_eq!(
-        regs[0],
-        Region {
-            start: 0x0010_1000,
-            size_bytes: 0x1000,
-        }
-    );
+    assert_eq!(regs[0], Region::new(0x0010_1000, 0x1000));
 }
 
 /// And the real-time clock is not on this board. Both boots probe for both devices, so both absences are
@@ -178,10 +140,7 @@ fn finds_the_rtc_by_compatible() {
 #[test]
 fn the_pl031_is_absent_on_riscv() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
-    let mut regs = [Region {
-        start: 0,
-        size_bytes: 0,
-    }; 2];
+    let mut regs = [Region::default(); 2];
     assert_eq!(
         tree.node_register_regions_compatible(b"arm,pl031", &mut regs)
             .unwrap(),
@@ -202,7 +161,7 @@ fn reads_a_property_from_every_matching_node() {
 
     let mut isa = [None; 4];
     assert_eq!(
-        tree.node_properties(b"cpu@", b"riscv,isa-base", &mut isa)
+        tree.node_properties(b"cpu", b"riscv,isa-base", &mut isa)
             .unwrap(),
         1
     );
@@ -212,7 +171,7 @@ fn reads_a_property_from_every_matching_node() {
     // A node that exists and has no such property: matched, and reported as `None`.
     let mut absent = [Some(&b"stale"[..]); 4];
     assert_eq!(
-        tree.node_properties(b"cpu@", b"mmu-flavor", &mut absent)
+        tree.node_properties(b"cpu", b"mmu-flavor", &mut absent)
             .unwrap(),
         1
     );
@@ -224,25 +183,38 @@ fn reads_a_property_from_every_matching_node() {
     // A prefix nothing matches.
     let mut nothing = [None; 4];
     assert_eq!(
-        tree.node_properties(b"gpu@", b"reg", &mut nothing).unwrap(),
+        tree.node_properties(b"gpu", b"reg", &mut nothing).unwrap(),
         0
     );
 }
 
-/// **More matching nodes than slots is counted, not hidden.** A caller that under-provisions its
-/// array gets a count larger than the array and can say so, which is the difference between "this
-/// machine has four harts and I read two" and "this machine has two harts".
+/// **More matching nodes than slots is refused, not hidden.** A caller that under-provisions its
+/// array gets `TooManyRegions`, as the region lookups give it, rather than a count it must compare
+/// with the array to tell "this machine has eight virtio devices and I read two" from "this
+/// machine has two".
 #[test]
-fn more_nodes_than_slots_reports_the_real_count() {
+fn more_nodes_than_slots_is_refused() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
 
-    // Every node under the root, matched by the empty prefix, into no space at all. The count is
-    // the honest one; nothing was written, because there was nowhere to write it.
     let mut none: [Option<&[u8]>; 0] = [];
-    let all = tree.node_properties(b"", b"compatible", &mut none).unwrap();
+    assert_eq!(
+        tree.node_properties(b"virtio_mmio", b"compatible", &mut none),
+        Err(Error::TooManyRegions)
+    );
+    let mut seven = [None; 7];
+    assert_eq!(
+        tree.node_properties(b"virtio_mmio", b"compatible", &mut seven),
+        Err(Error::TooManyRegions)
+    );
+    let mut eight = [None; 8];
+    assert_eq!(
+        tree.node_properties(b"virtio_mmio", b"compatible", &mut eight),
+        Ok(8)
+    );
     assert!(
-        all > 1,
-        "the tree has many nodes, and it said so with nowhere to put them"
+        eight
+            .iter()
+            .all(|value| value == &Some(&b"virtio,mmio\0"[..]))
     );
 }
 
@@ -256,7 +228,7 @@ fn follows_the_serial_interrupt_parent_to_the_plic() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
 
     let parent = tree
-        .node_property_inherited(b"serial@", b"interrupt-parent")
+        .node_property_inherited(b"serial", b"interrupt-parent")
         .unwrap()
         .expect("the serial node names its interrupt parent");
     let phandle = u32::from_be_bytes(parent[..4].try_into().unwrap());

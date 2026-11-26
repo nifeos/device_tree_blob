@@ -11,6 +11,17 @@ keywords = ["no-std", "device-tree", "devicetree", "fdt", "parser"]
 categories = ["no-std", "no-std::no-alloc", "parser-implementations", "embedded"]
 documentation = "https://docs.rs/device_tree_blob"
 publish = false     # set to true only in the release that publishes
+# What the package holds: the source, the tests and the fixtures the doctests read, and the
+# documents a reader of the crate needs. The repository's hooks, workflows, lint configuration and
+# falsification patches stay out.
+include = [
+    "/src/",
+    "/tests/",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+]
 
 # A flattened device tree parser. The blob is the machine describing itself, handed over by
 # firmware, and the crate reads it as untrusted input: every offset is checked, every walk is

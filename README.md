@@ -21,13 +21,13 @@ use device_tree_blob::{DeviceTreeBlob, Region};
 let blob = include_bytes!("tests/fixtures/qemu-riscv64-virt.dtb");
 let tree = DeviceTreeBlob::from_bytes(blob)?;
 
-let mut ram = [Region { start: 0, size_bytes: 0 }; 4];
+let mut ram = [Region::default(); 4];
 let banks = tree.memory_regions(&mut ram)?;
-assert_eq!(&ram[..banks], [Region { start: 0x8000_0000, size_bytes: 0x800_0000 }]);
+assert_eq!(&ram[..banks], [Region::new(0x8000_0000, 0x800_0000)]);
 
-let mut rtc = [Region { start: 0, size_bytes: 0 }; 1];
+let mut rtc = [Region::default(); 1];
 let found = tree.node_register_regions_compatible(b"google,goldfish-rtc", &mut rtc)?;
-assert_eq!(&rtc[..found], [Region { start: 0x10_1000, size_bytes: 0x1000 }]);
+assert_eq!(&rtc[..found], [Region::new(0x10_1000, 0x1000)]);
 # Ok::<(), device_tree_blob::Error>(())
 ```
 
@@ -40,28 +40,35 @@ The same code runs as a doctest on `memory_regions` and `node_register_regions_c
 | The memory banks | `memory_regions` |
 | The memory reservation block | `memory_reservations` |
 | The children of `/reserved-memory` | `reserved_memory_regions` |
-| The register regions of a node, by name prefix or by `compatible` | `node_register_regions`, `node_register_regions_compatible` |
+| The register regions of a node, by name or by `compatible` | `node_register_regions`, `node_register_regions_compatible` |
 | One property of a node | `node_property`, `node_property_inherited`, `node_property_compatible`, `parent_property_compatible`, `pointer_handle_property`, `node_properties` |
 | The `/chosen` node | `initial_ramdisk`, `boot_arguments` |
+| Any node, by path or by walking the tree, and its children and properties | `root`, `nodes`, `find_node`, then `Node::children`, `Node::properties`, `Node::property` |
 
 Build a tree with `DeviceTreeBlob::from_bytes`, or with the crate's one `unsafe` function,
 `DeviceTreeBlob::from_pointer`, when firmware hands over only an address.
 
 A few behaviors a stranger may not expect:
 
+- `from_bytes` walks the reservation block and the whole structure block once. It refuses a blob
+  that is not whole: an unknown token, unbalanced nesting, no root or two, a property after its
+  node's first child, or a name with no terminator. A lookup on an accepted tree fails only on the
+  shape of a value it reads or a full output slice.
 - Every lookup walks the structure block from its first token and holds nothing between calls.
-- Output goes into a caller's `&mut [Region]` and the count comes back, because the crate has no
-  allocator. A slice too short is `Error::TooManyRegions`, never a silent truncation.
+- Output goes into a caller's `&mut [Region]` (or, for `node_properties`, a slice of values) and
+  the count comes back, because the crate has no allocator. A slice too short is
+  `Error::TooManyRegions` for all six, never a silent truncation.
 - Cell widths come from the nearest ancestor that declares them, as Linux does, and not from the
   specification's default of 2 and 1. A reader that follows the specification returns a different
   region for a tree that is silent.
-- `node_register_regions` matches a name prefix (`b"serial"` matches `serial@10000000`) and stops at
-  the first match. `node_register_regions_compatible` is the strict form.
+- A lookup by name takes the whole name or the name before its unit address: `b"serial"` names
+  `serial@10000000` and never `serial-bus`. It stops at the first match.
+  `node_register_regions_compatible` is the strict form.
 - `from_bytes` accepts a buffer longer than the blob and trims it to `totalsize`. `from_pointer`
   reads eight bytes through the pointer before it validates anything, then trusts the header's
   length up to `MAXIMUM_TOTAL_SIZE_BYTES`, 2 MiB.
-- A tree nested deeper than `MAXIMUM_DEPTH` (64) is `Error::TooDeep`, and a `reg` under more than
-  `MAXIMUM_CELLS` (4) cells is `Error::BadValue`.
+- A tree nested deeper than `MAXIMUM_DEPTH` (64) is refused with `Error::TooDeep`, and a `reg`
+  under more than `MAXIMUM_CELLS` (4) cells is `Error::BadValue`.
 
 ## What the proofs cover
 
@@ -74,7 +81,9 @@ Kani harnesses in `src/lib.rs` prove the leaf readers and the token step:
 - One token step is total and advances, so a walk ends.
 - A cell value wider than 64 bits is `BadValue`, and the region decoder never writes past its
   output.
-- A buffer of up to 48 bytes gives a tree or an error, and the tree lies inside the buffer.
+- The header checks give a tree or an error for any buffer of up to 48 bytes, and the tree lies
+  inside the buffer. The walk that `from_bytes` adds after them is a loop over the token step; the
+  model checker runs out of memory on that walk whole, so the fuzz target runs it instead.
 
 Each harness has a falsification patch in `falsifications/` that breaks the code under proof and
 turns the harness red. The walkers are not proved. The hostile tests in `tests/hostile.rs` pin the
@@ -100,7 +109,7 @@ network access. Then run every harness:
 cargo kani
 ```
 
-Measured on an x86_64 Linux machine with Kani 0.68.0, the run of all nine harnesses took 9 minutes of wall time and peaked at 7.5 GiB of resident memory. The token-step harness takes 426 seconds of that, and the other eight take 92 seconds together.
+Measured on an x86_64 Linux machine with Kani 0.68.0, the run of all nine harnesses took 6.5 minutes of wall time and peaked at 6.7 GiB of resident memory. The token-step harness takes 304 seconds of that, and the other eight take 70 seconds together.
 
 A passing run prints warnings that mean nothing, among them `use of an unstable feature` for
 `register_tool`, `Found the following unsupported constructs`, and lines about unreachable code.
