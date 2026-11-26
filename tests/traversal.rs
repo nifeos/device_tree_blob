@@ -108,7 +108,7 @@ fn the_aarch64_walk_reaches_every_node_both_ways() {
 /// A path names a node by the lookups' rule: its whole name, or the name before its unit
 /// address. A path must start with `/`, and an empty component names nothing.
 #[test]
-fn a_path_names_a_node_by_the_unit_address_rule() {
+fn a_path_component_names_a_node_as_a_lookup_by_name_does() {
     let tree = DeviceTreeBlob::from_bytes(RISCV).unwrap();
     let serial = tree.find_node(b"/soc/serial@10000000").unwrap();
     assert_eq!(serial.name(), b"serial@10000000");

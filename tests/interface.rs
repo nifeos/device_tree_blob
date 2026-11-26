@@ -46,7 +46,7 @@ fn debug_prints_the_layout_not_the_bytes() {
 
 /// **A region sorts by address and keeps in a set, and an error keeps in a set.**
 #[test]
-fn regions_sort_by_address_and_hash() {
+fn regions_sort_by_start_then_size_and_hash() {
     let mut map = [
         Region::new(0x9000_0000, 0x1000),
         Region::new(0x8000_0000, 0x2000),
