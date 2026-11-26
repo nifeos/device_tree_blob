@@ -2,7 +2,8 @@
 //!
 //! The specification places every property name inside the strings block, `size_dt_strings` bytes
 //! from `off_dt_strings`, and libfdt's `fdt_get_string` reads one only there. These blobs put a
-//! name offset, or a name's end, outside that block, and check the parser refuses each one.
+//! name offset, or a name's end, outside that block, and check the parser refuses each one when
+//! the tree is built.
 
 use device_tree_blob::{DeviceTreeBlob, Error};
 
@@ -111,8 +112,10 @@ fn one_property(strings: &[u8], name_offset: u32) -> Vec<u8> {
 #[test]
 fn a_property_name_without_a_terminator_inside_the_strings_block_is_refused() {
     let blob = one_property(b"abc", 0);
-    let tree = DeviceTreeBlob::from_bytes(&blob).unwrap();
-    assert_eq!(tree.node_property(b"chosen", b"abc"), Err(Error::BadValue));
+    assert_eq!(
+        DeviceTreeBlob::from_bytes(&blob).err(),
+        Some(Error::BadValue)
+    );
 }
 
 /// **A name offset at or past the end of the strings block is refused**, as libfdt's
@@ -122,7 +125,7 @@ fn a_property_name_without_a_terminator_inside_the_strings_block_is_refused() {
 fn a_property_name_offset_past_the_strings_block_is_refused() {
     let at = |name_offset: u32| {
         let blob = one_property(b"ab\0", name_offset);
-        let tree = DeviceTreeBlob::from_bytes(&blob).unwrap();
+        let tree = DeviceTreeBlob::from_bytes(&blob)?;
         tree.node_property(b"chosen", b"b")
             .map(|value| value.is_some())
     };
@@ -136,7 +139,7 @@ fn a_property_name_offset_past_the_strings_block_is_refused() {
 /// block is declared one byte long (`x`), and the blob carries more nonzero bytes and a zero after
 /// it. A search bounded by the blob's end instead would read the name as `x` and those bytes, and
 /// would read them again for every property that points there, so a walk over many such properties
-/// would cost their count times the length of the run. Each lookup is now refused at the first
+/// would cost their count times the length of the run. The tree is now refused at the first
 /// property. The header must also place the whole strings block inside the blob.
 #[test]
 fn the_property_name_search_stops_at_the_end_of_the_strings_block() {
@@ -161,12 +164,10 @@ fn the_property_name_search_stops_at_the_end_of_the_strings_block() {
     assert_eq!(tree.node_property(b"chosen", b"absent"), Ok(None));
 
     let short = patched(&whole, STRINGS_SIZE_FIELD_OFFSET_BYTES, 1);
-    let tree = DeviceTreeBlob::from_bytes(&short).unwrap();
     assert_eq!(
-        tree.node_property(b"chosen", b"absent"),
-        Err(Error::BadValue)
+        DeviceTreeBlob::from_bytes(&short).err(),
+        Some(Error::BadValue)
     );
-    assert_eq!(tree.node_property(b"chosen", b"x"), Err(Error::BadValue));
 
     // The strings block reaching exactly to the blob's end is accepted; one byte further is not,
     // nor is a size that wraps.

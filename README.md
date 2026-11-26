@@ -49,6 +49,10 @@ Build a tree with `DeviceTreeBlob::from_bytes`, or with the crate's one `unsafe`
 
 A few behaviors a stranger may not expect:
 
+- `from_bytes` walks the reservation block and the whole structure block once and refuses a blob
+  that is not whole: an unknown token, unbalanced nesting, no root or two, a property after its
+  node's first child, or a name with no terminator. A lookup on an accepted tree fails only on the
+  shape of a value it reads or a full output slice.
 - Every lookup walks the structure block from its first token and holds nothing between calls.
 - Output goes into a caller's `&mut [Region]` (or, for `node_properties`, a slice of values) and
   the count comes back, because the crate has no allocator. A slice too short is
@@ -62,7 +66,7 @@ A few behaviors a stranger may not expect:
 - `from_bytes` accepts a buffer longer than the blob and trims it to `totalsize`. `from_pointer`
   reads eight bytes through the pointer before it validates anything, then trusts the header's
   length up to `MAXIMUM_TOTAL_SIZE_BYTES`, 2 MiB.
-- A tree nested deeper than `MAXIMUM_DEPTH` (64) is `Error::TooDeep`, and a `reg` under more than
+- A tree nested deeper than `MAXIMUM_DEPTH` (64) is refused with `Error::TooDeep`, and a `reg` under more than
   `MAXIMUM_CELLS` (4) cells is `Error::BadValue`.
 
 ## What the proofs cover

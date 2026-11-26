@@ -275,6 +275,24 @@ impl<'a> DeviceTreeBlob<'a> {
     /// strings block before it), and a `last_compatible_version` above 17 is refused. The strings
     /// block (`size_dt_strings` bytes) must lie inside the blob; `boot_cpuid_phys` is not read.
     ///
+    /// It then walks the memory reservation block and the whole structure block once, so a tree it
+    /// returns is whole: every later lookup on it walks only tokens, names and nesting this walk
+    /// accepted, and fails, if at all, only on the shape of a value it reads or a full output
+    /// slice.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::BadMagic`] when the first word is not `0xd00dfeed`.
+    /// - [`Error::UnsupportedVersion`] when `last_compatible_version` is above 17.
+    /// - [`Error::Truncated`] when the header, a block or a value runs past the blob, or the
+    ///   structure block ends before its `FDT_END`.
+    /// - [`Error::BadToken`] for a token the specification does not define.
+    /// - [`Error::BadValue`] for a node or property name with no terminating zero byte.
+    /// - [`Error::TooDeep`] for nesting deeper than [`MAXIMUM_DEPTH`].
+    /// - [`Error::BadStructure`] for nesting that does not balance, no root node or a second one, a
+    ///   property outside every node, or a property after its node's first child.
+    /// - [`Error::RegionOverflow`] for a reservation entry that wraps the address space.
+    ///
     /// # Examples
     ///
     /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it:
@@ -291,6 +309,15 @@ impl<'a> DeviceTreeBlob<'a> {
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, Error> {
+        let tree = Self::from_header(bytes)?;
+        tree.check_reservations()?;
+        tree.check_structure()?;
+        Ok(tree)
+    }
+
+    /// The header checks of [`from_bytes`](Self::from_bytes), without its walks over the
+    /// reservation and structure blocks: a tree whose blocks lie inside the blob, and nothing more.
+    fn from_header(bytes: &'a [u8]) -> Result<Self, Error> {
         let magic = be32(bytes, 0)?;
         if magic != MAGIC {
             return Err(Error::BadMagic(magic));
@@ -353,8 +380,68 @@ impl<'a> DeviceTreeBlob<'a> {
         {
             return Err(Error::Truncated);
         }
-
         Ok(tree)
+    }
+
+    /// Walk the memory reservation block to its all-zero terminator, refusing what
+    /// [`memory_reservations`](Self::memory_reservations) would refuse other than a full `out`: an
+    /// entry past the blob's end ([`Error::Truncated`]) and one that wraps
+    /// ([`Error::RegionOverflow`]).
+    fn check_reservations(&self) -> Result<(), Error> {
+        let mut at = self.reservations_offset;
+        loop {
+            let start = be64(self.bytes, at)?;
+            let size = be64(self.bytes, at.checked_add(8).ok_or(Error::Truncated)?)?;
+            at = at.checked_add(16).ok_or(Error::Truncated)?;
+            if start == 0 && size == 0 {
+                return Ok(());
+            }
+            if start.checked_add(size).is_none() {
+                return Err(Error::RegionOverflow);
+            }
+        }
+    }
+
+    /// Walk the whole structure block once, so that every later walk over it meets only what this
+    /// one accepted.
+    ///
+    /// Refuses every fault a walk can reach: a token it does not know ([`Error::BadToken`]), a
+    /// block that ends before its end token or a value past the block ([`Error::Truncated`]), a
+    /// node or property name with no terminator ([`Error::BadValue`]), nesting deeper than
+    /// [`MAXIMUM_DEPTH`] ([`Error::TooDeep`]), and a shape the specification's section 5.4 rules
+    /// out ([`Error::BadStructure`]): nesting that does not balance, no root node or a second one,
+    /// a property outside every node, and a property after its node's first child.
+    fn check_structure(&self) -> Result<(), Error> {
+        // Per open node: whether a child has opened inside it, after which no property of its
+        // own may follow.
+        let mut has_child = [false; DEPTH_SLOTS];
+        let mut roots = 0usize;
+        let mut tokens = self.tokens();
+
+        while let Some((depth, token)) = tokens.step()? {
+            match token {
+                Token::BeginNode { .. } => {
+                    if depth == 1 {
+                        if roots == 1 {
+                            return Err(Error::BadStructure);
+                        }
+                        roots = 1;
+                    }
+                    has_child[depth - 1] = true;
+                    has_child[depth] = false;
+                }
+                Token::EndNode => {}
+                Token::Property { .. } => {
+                    if depth == 0 || has_child[depth] {
+                        return Err(Error::BadStructure);
+                    }
+                }
+            }
+        }
+        if roots == 0 {
+            return Err(Error::BadStructure);
+        }
+        Ok(())
     }
 
     /// How many bytes the blob occupies. We need this to mark it as reserved: it is
@@ -1498,8 +1585,9 @@ mod verification {
 
     /// Falsification: replayable `falsifications/verification.a_token_step_is_total_and_moves_forward.patch`
     /// **One step of the token walk is total, moves forward, and keeps the depth in bounds.** Over
-    /// any 56-byte blob `from_bytes` accepts whose structure and strings blocks start after the
-    /// header, three steps each return a token, the end or an error without panicking; each token
+    /// any 56-byte blob whose header `from_bytes` accepts and whose structure and strings blocks
+    /// start after the header, whatever those blocks hold, three steps each return a token, the end
+    /// or an error without panicking; each token
     /// moves the cursor forward, so no walk can stall, and the depth never passes `MAXIMUM_DEPTH`.
     /// Starting both blocks after the header bounds every name scan at 16 bytes, which is what
     /// keeps the unwinding small; the bytes of the blocks themselves are unconstrained.
@@ -1507,7 +1595,7 @@ mod verification {
     #[kani::unwind(17)]
     fn a_token_step_is_total_and_moves_forward() {
         let bytes: [u8; 56] = kani::any();
-        let Ok(tree) = DeviceTreeBlob::from_bytes(&bytes) else {
+        let Ok(tree) = DeviceTreeBlob::from_header(&bytes) else {
             return;
         };
         kani::assume(tree.structure_offset == HEADER_BYTES && tree.strings_offset >= HEADER_BYTES);
