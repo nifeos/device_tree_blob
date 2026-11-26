@@ -448,7 +448,7 @@ impl<'a> DeviceTreeBlob<'a> {
             match token {
                 Token::BeginNode { name } => {
                     if depth == 2 {
-                        named_memory = name == b"memory" || name.starts_with(b"memory@");
+                        named_memory = names_node(b"memory", name);
                         typed_memory = false;
                         available = true;
                         register_value = None;
@@ -486,16 +486,21 @@ impl<'a> DeviceTreeBlob<'a> {
     }
 
     /// The register regions (`reg`, the Devicetree Specification's abbreviation for the
-    /// property) of the first node whose name starts with `prefix`, searched at any depth.
+    /// property) of the first node below the root that `node` names, searched at any depth.
+    ///
+    /// `node` names a node by its full name (`b"serial@10000000"`), or by the name without its unit
+    /// address (`b"serial"` names `serial@10000000`, and never `serial-bus`), as the Devicetree
+    /// Specification's section 2.2.1 lets a node be named and as libfdt's `fdt_subnode_offset`
+    /// matches one. An empty `node` names no node.
     ///
     /// Decodes with the `#address-cells`/`#size-cells` of the node's **parent**, carried down a
     /// per-depth stack, so a device nested under `/soc` reads as well as one under the root. A generic interrupt controller (GIC)
-    /// decodes to two regions, distributor first, as its binding orders them. Matching a name prefix
+    /// decodes to two regions, distributor first, as its binding orders them. Matching a name
     /// rather than `compatible` is a simplification; [`node_register_regions_compatible`](Self::node_register_regions_compatible)
     /// is the correct lookup. The first match is the answer: one with no `reg` yields zero regions, and
     /// a later match's `reg` is never read in its place.
     #[doc(alias = "reg")]
-    pub fn node_register_regions(&self, prefix: &[u8], out: &mut [Region]) -> Result<usize, Error> {
+    pub fn node_register_regions(&self, node: &[u8], out: &mut [Region]) -> Result<usize, Error> {
         // The cell counts declared by the node open at each depth, applying to its children. Depth
         // 0 is the slot above the root; the root is depth 1. The specification's defaults are 2
         // and 1.
@@ -511,7 +516,7 @@ impl<'a> DeviceTreeBlob<'a> {
                     // properties come before its children).
                     bus_address_cells[depth] = bus_address_cells[depth - 1];
                     bus_size_cells[depth] = bus_size_cells[depth - 1];
-                    if depth >= 2 && target_at.is_none() && name.starts_with(prefix) {
+                    if depth >= 2 && target_at.is_none() && names_node(node, name) {
                         target_at = Some(depth);
                     }
                 }
@@ -706,21 +711,24 @@ impl<'a> DeviceTreeBlob<'a> {
         Ok(None)
     }
 
-    /// The raw bytes of property `name` on the first node whose name starts with `prefix`,
+    /// The raw bytes of property `name` on the first node below the root that `node` names,
     /// searched at any depth. `Ok(None)` when no such node, or the node has no such property.
+    ///
+    /// `node` names a node as in [`node_register_regions`](Self::node_register_regions): the full
+    /// name, or the name without its unit address.
     ///
     /// The generic escape hatch next to the decoded accessors above: some properties have
     /// per-binding layouts no general decoder can know (`interrupt-map` is the motivating case:
     /// its entry width depends on three different nodes' cell counts). The caller gets the bytes
     /// (big-endian cells, as the specification lays them out) and owns the interpretation.
-    pub fn node_property(&self, prefix: &[u8], name: &[u8]) -> Result<Option<&'a [u8]>, Error> {
+    pub fn node_property(&self, node: &[u8], name: &[u8]) -> Result<Option<&'a [u8]>, Error> {
         let mut target_at: Option<usize> = None;
         let mut tokens = self.tokens();
 
         while let Some((depth, token)) = tokens.step()? {
             match token {
                 Token::BeginNode { name: node_name } => {
-                    if depth >= 2 && target_at.is_none() && node_name.starts_with(prefix) {
+                    if depth >= 2 && target_at.is_none() && names_node(node, node_name) {
                         target_at = Some(depth);
                     }
                 }
@@ -743,8 +751,9 @@ impl<'a> DeviceTreeBlob<'a> {
         Ok(None)
     }
 
-    /// Property `name` on the first node whose name starts with `prefix`, **falling back to the
-    /// nearest ancestor** that carries it. `Ok(None)` when no such node, or neither the node nor
+    /// Property `name` on the first node below the root that `node` names (as in
+    /// [`node_register_regions`](Self::node_register_regions)), **falling back to the nearest
+    /// ancestor** that carries it. `Ok(None)` when no such node, or neither the node nor
     /// any ancestor has the property.
     ///
     /// For the properties the spec defines as inheritable, such as `interrupt-parent`, which QEMU's
@@ -753,7 +762,7 @@ impl<'a> DeviceTreeBlob<'a> {
     /// the answer is taken at the target's `END_NODE`.
     pub fn node_property_inherited(
         &self,
-        prefix: &[u8],
+        node: &[u8],
         name: &[u8],
     ) -> Result<Option<&'a [u8]>, Error> {
         // `name`'s value on the node open at each depth, `None` where it has none. A node's
@@ -767,7 +776,7 @@ impl<'a> DeviceTreeBlob<'a> {
             match token {
                 Token::BeginNode { name: node_name } => {
                     values[depth] = None;
-                    if depth >= 2 && target_at.is_none() && node_name.starts_with(prefix) {
+                    if depth >= 2 && target_at.is_none() && names_node(node, node_name) {
                         target_at = Some(depth);
                     }
                 }
@@ -842,7 +851,9 @@ impl<'a> DeviceTreeBlob<'a> {
         Ok(None)
     }
 
-    /// Property `name` on **every** node whose name starts with `prefix`, in tree order.
+    /// Property `name` on **every** node below the root that `node` names (as in
+    /// [`node_register_regions`](Self::node_register_regions)), in tree order: `b"cpu"` names each
+    /// `cpu@<unit address>`.
     ///
     /// For a node that repeats, such as each hart's `cpu@` on a heterogeneous RISC-V machine like
     /// the JH7110, whose harts differ in their `riscv,isa`. `out[i]` is `None` when the *i*th match has no
@@ -863,14 +874,14 @@ impl<'a> DeviceTreeBlob<'a> {
     /// ));
     /// let tree = DeviceTreeBlob::from_bytes(blob)?;
     /// let mut isa = [None; 8];
-    /// let harts = tree.node_properties(b"cpu@", b"riscv,isa-base", &mut isa)?;
+    /// let harts = tree.node_properties(b"cpu", b"riscv,isa-base", &mut isa)?;
     /// assert!(harts <= isa.len(), "more harts than slots: widen the array");
     /// assert_eq!(isa[..harts], [Some(&b"rv64i\0"[..])]);
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
     pub fn node_properties(
         &self,
-        prefix: &[u8],
+        node: &[u8],
         name: &[u8],
         out: &mut [Option<&'a [u8]>],
     ) -> Result<usize, Error> {
@@ -888,7 +899,7 @@ impl<'a> DeviceTreeBlob<'a> {
         while let Some((depth, token)) = tokens.step()? {
             match token {
                 Token::BeginNode { name: node_name } => {
-                    if depth >= 2 && target_at.is_none() && node_name.starts_with(prefix) {
+                    if depth >= 2 && target_at.is_none() && names_node(node, node_name) {
                         target_at = Some(depth);
                         matched += 1;
                     }
@@ -1186,6 +1197,18 @@ fn declare_cells(name: &[u8], value: &[u8], bus_address_cells: &mut u32, bus_siz
         b"#address-cells" => *bus_address_cells = u32::from_be_bytes(cell),
         b"#size-cells" => *bus_size_cells = u32::from_be_bytes(cell),
         _ => {}
+    }
+}
+
+/// Whether `wanted` names the node called `node_name`: the same name, or, when `wanted` carries no
+/// unit address, the same name followed by `@` and one. libfdt's `fdt_nodename_eq_` is the same
+/// rule. An empty `wanted` names nothing.
+fn names_node(wanted: &[u8], node_name: &[u8]) -> bool {
+    match node_name.strip_prefix(wanted) {
+        Some(rest) if !wanted.is_empty() => {
+            rest.is_empty() || (rest[0] == b'@' && !wanted.contains(&b'@'))
+        }
+        _ => false,
     }
 }
 

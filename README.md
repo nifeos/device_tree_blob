@@ -40,7 +40,7 @@ The same code runs as a doctest on `memory_regions` and `node_register_regions_c
 | The memory banks | `memory_regions` |
 | The memory reservation block | `memory_reservations` |
 | The children of `/reserved-memory` | `reserved_memory_regions` |
-| The register regions of a node, by name prefix or by `compatible` | `node_register_regions`, `node_register_regions_compatible` |
+| The register regions of a node, by name or by `compatible` | `node_register_regions`, `node_register_regions_compatible` |
 | One property of a node | `node_property`, `node_property_inherited`, `node_property_compatible`, `parent_property_compatible`, `pointer_handle_property`, `node_properties` |
 | The `/chosen` node | `initial_ramdisk`, `boot_arguments` |
 
@@ -55,8 +55,9 @@ A few behaviors a stranger may not expect:
 - Cell widths come from the nearest ancestor that declares them, as Linux does, and not from the
   specification's default of 2 and 1. A reader that follows the specification returns a different
   region for a tree that is silent.
-- `node_register_regions` matches a name prefix (`b"serial"` matches `serial@10000000`) and stops at
-  the first match. `node_register_regions_compatible` is the strict form.
+- A lookup by name takes the whole name or the name before its unit address: `b"serial"` names
+  `serial@10000000` and never `serial-bus`. It stops at the first match.
+  `node_register_regions_compatible` is the strict form.
 - `from_bytes` accepts a buffer longer than the blob and trims it to `totalsize`. `from_pointer`
   reads eight bytes through the pointer before it validates anything, then trusts the header's
   length up to `MAXIMUM_TOTAL_SIZE_BYTES`, 2 MiB.

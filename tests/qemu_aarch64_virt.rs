@@ -124,7 +124,7 @@ fn finds_the_interrupt_controller() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_VIRT).unwrap();
     let mut regs = [Region::default(); 4];
 
-    let n = tree.node_register_regions(b"intc@", &mut regs).unwrap();
+    let n = tree.node_register_regions(b"intc", &mut regs).unwrap();
 
     // The GIC has TWO register blocks, and the order is part of the binding.
     assert_eq!(
@@ -144,7 +144,7 @@ fn finds_the_uart_the_console_hardcodes() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_VIRT).unwrap();
     let mut regs = [Region::default(); 2];
 
-    assert_eq!(tree.node_register_regions(b"pl011@", &mut regs).unwrap(), 1);
+    assert_eq!(tree.node_register_regions(b"pl011", &mut regs).unwrap(), 1);
     assert_eq!(regs[0].start, 0x0900_0000);
 }
 
@@ -153,7 +153,7 @@ fn a_missing_node_is_zero_regions_not_an_error() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_VIRT).unwrap();
     let mut regs = [Region::default(); 2];
     assert_eq!(
-        tree.node_register_regions(b"nonesuch@", &mut regs).unwrap(),
+        tree.node_register_regions(b"nonesuch", &mut regs).unwrap(),
         0
     );
 }
@@ -232,13 +232,13 @@ fn inherits_the_interrupt_parent_from_the_root() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_VIRT).unwrap();
 
     assert_eq!(
-        tree.node_property(b"pl011@", b"interrupt-parent").unwrap(),
+        tree.node_property(b"pl011", b"interrupt-parent").unwrap(),
         None,
         "the node itself does not say; the root does"
     );
 
     let parent = tree
-        .node_property_inherited(b"pl011@", b"interrupt-parent")
+        .node_property_inherited(b"pl011", b"interrupt-parent")
         .unwrap()
         .expect("inherited from the root");
     let phandle = u32::from_be_bytes(parent[..4].try_into().unwrap());

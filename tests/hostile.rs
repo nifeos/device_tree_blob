@@ -414,7 +414,7 @@ fn cell_widths_are_inherited_and_a_reg_uses_its_parents() {
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
 
     let mut out = [Region::default(); 4];
-    assert_eq!(dt.node_register_regions(b"dev@", &mut out), Ok(2));
+    assert_eq!(dt.node_register_regions(b"dev", &mut out), Ok(2));
     assert_eq!((out[0].start, out[0].size_bytes), (0x1000_0000, 0x100));
     assert_eq!((out[1].start, out[1].size_bytes), (0x2000_0000, 0x200));
 }
@@ -438,7 +438,7 @@ fn a_prefix_finds_its_node_not_the_first_node() {
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
 
     let mut out = [Region::default(); 2];
-    assert_eq!(dt.node_register_regions(b"uart@", &mut out), Ok(1));
+    assert_eq!(dt.node_register_regions(b"uart", &mut out), Ok(1));
     assert_eq!((out[0].start, out[0].size_bytes), (0x900_0000, 0x1000));
 }
 
@@ -462,7 +462,7 @@ fn a_matched_node_survives_its_children_closing() {
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
 
     let mut out = [Region::default(); 2];
-    assert_eq!(dt.node_register_regions(b"m@", &mut out), Ok(1));
+    assert_eq!(dt.node_register_regions(b"m", &mut out), Ok(1));
     assert_eq!((out[0].start, out[0].size_bytes), (0xAB00, 0x40));
 }
 
@@ -491,7 +491,7 @@ fn a_declaration_at_the_deepest_depth_has_its_own_slot() {
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
 
     let mut out = [Region::default(); 1];
-    assert_eq!(dt.node_register_regions(b"m@", &mut out), Ok(1));
+    assert_eq!(dt.node_register_regions(b"m", &mut out), Ok(1));
     assert_eq!((out[0].start, out[0].size_bytes), (0xAB00, 0x40));
 }
 
@@ -580,7 +580,7 @@ fn node_props_tells_missing_prop_from_missing_node() {
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
 
     let mut out = [None; 4];
-    assert_eq!(dt.node_properties(b"cpu@", b"riscv,isa", &mut out), Ok(2));
+    assert_eq!(dt.node_properties(b"cpu", b"riscv,isa", &mut out), Ok(2));
     assert_eq!(out[0], Some(&b"rv64gc\0"[..]));
     assert_eq!(out[1], None);
 }
@@ -749,7 +749,7 @@ fn a_roots_reg_is_never_a_named_devices() {
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
 
     let mut out = [Region::default(); 2];
-    assert_eq!(dt.node_register_regions(b"absent@", &mut out), Ok(0));
+    assert_eq!(dt.node_register_regions(b"absent", &mut out), Ok(0));
 }
 
 /// The compatible walker inherits cell widths through a silent intermediary, the same
@@ -826,7 +826,7 @@ fn node_prop_ignores_the_root_and_survives_a_closing_sibling() {
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
 
     assert_eq!(
-        dt.node_property(b"uart@", b"status"),
+        dt.node_property(b"uart", b"status"),
         Ok(Some(&b"okay\0"[..]))
     );
 }
@@ -1426,8 +1426,8 @@ fn node_reg_stops_at_the_first_matching_node_even_without_a_reg() {
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
 
     let mut out = [Region::default(); 2];
-    assert_eq!(dt.node_property(b"uart@", b"reg"), Ok(None));
-    assert_eq!(dt.node_register_regions(b"uart@", &mut out), Ok(0));
+    assert_eq!(dt.node_property(b"uart", b"reg"), Ok(None));
+    assert_eq!(dt.node_register_regions(b"uart", &mut out), Ok(0));
 
     // The control: asked for the second node by its own name, it answers.
     assert_eq!(dt.node_register_regions(b"uart@2", &mut out), Ok(1));
@@ -1783,7 +1783,7 @@ fn a_reg_that_does_not_fit_a_region_is_a_bad_value() {
         type Lookup<'t> = &'t dyn Fn(&mut [Region]) -> Result<usize, Error>;
         let lookups: [Lookup<'_>; 4] = [
             &|out| dt.memory_regions(out),
-            &|out| dt.node_register_regions(b"rtc@", out),
+            &|out| dt.node_register_regions(b"rtc", out),
             &|out| dt.node_register_regions_compatible(b"vendor,rtc", out),
             &|out| dt.reserved_memory_regions(out),
         ];
@@ -1874,4 +1874,69 @@ fn memory_is_a_named_or_typed_root_child_the_firmware_has_not_disabled() {
     let n = dt.memory_regions(&mut out).unwrap();
     let starts: Vec<u64> = out[..n].iter().map(|region| region.start).collect();
     assert_eq!(starts, [0x2000, 0x3000, 0x7000]);
+}
+
+/// **A lookup names a node by its whole name or by the name before its unit address, never by a
+/// prefix.** `b"cpu"` once matched a `cpus` node and `b"memory"` a `memory-controller@` node,
+/// because the lookups compared with `starts_with`; now each takes the exact name, or the name
+/// followed by `@` and a unit address, as libfdt's `fdt_subnode_offset` does.
+#[test]
+fn a_lookup_names_a_node_and_never_a_prefix_of_one() {
+    let mut b = Blob::new();
+    b.begin_node(b"");
+    b.prop(b"#address-cells", &2u32.to_be_bytes());
+    b.prop(b"#size-cells", &2u32.to_be_bytes());
+    b.begin_node(b"cpus");
+    b.prop(b"which", b"cpus\0");
+    b.begin_node(b"cpu@0");
+    b.prop(b"which", b"cpu@0\0");
+    b.end_node();
+    b.begin_node(b"cpu@1");
+    b.prop(b"which", b"cpu@1\0");
+    b.end_node();
+    b.end_node();
+    b.begin_node(b"memory-controller@4000");
+    b.prop(b"device_type", b"memory-controller\0");
+    b.prop(b"reg", &reg64(0x4000, 0x100));
+    b.end_node();
+    b.begin_node(b"memory@80000000");
+    b.prop(b"reg", &reg64(0x8000_0000, 0x1000));
+    b.end_node();
+    b.end_node();
+    let blob = b.finish();
+    let tree = DeviceTreeBlob::from_bytes(&blob).unwrap();
+
+    assert_eq!(
+        tree.node_property(b"cpu", b"which"),
+        Ok(Some(&b"cpu@0\0"[..]))
+    );
+    assert_eq!(
+        tree.node_property(b"cpus", b"which"),
+        Ok(Some(&b"cpus\0"[..]))
+    );
+    assert_eq!(
+        tree.node_property(b"cpu@1", b"which"),
+        Ok(Some(&b"cpu@1\0"[..]))
+    );
+    assert_eq!(tree.node_property(b"cp", b"which"), Ok(None));
+    assert_eq!(tree.node_property(b"cpu@", b"which"), Ok(None));
+    assert_eq!(tree.node_property(b"cpu@1@", b"which"), Ok(None));
+    assert_eq!(tree.node_property(b"", b"which"), Ok(None));
+    assert_eq!(
+        tree.node_property_inherited(b"cpu@1", b"which"),
+        Ok(Some(&b"cpu@1\0"[..]))
+    );
+    assert_eq!(tree.node_property_inherited(b"cp", b"which"), Ok(None));
+
+    let mut values = [None; 4];
+    assert_eq!(tree.node_properties(b"cpu", b"which", &mut values), Ok(2));
+    assert_eq!(values[..2], [Some(&b"cpu@0\0"[..]), Some(&b"cpu@1\0"[..])]);
+    assert_eq!(tree.node_properties(b"cpu@", b"which", &mut values), Ok(0));
+
+    let mut out = [Region::default(); 2];
+    assert_eq!(tree.node_register_regions(b"memory", &mut out), Ok(1));
+    assert_eq!(out[0], Region::new(0x8000_0000, 0x1000));
+    assert_eq!(tree.node_register_regions(b"memory-", &mut out), Ok(0));
+    assert_eq!(tree.memory_regions(&mut out), Ok(1));
+    assert_eq!(out[0], Region::new(0x8000_0000, 0x1000));
 }

@@ -35,7 +35,7 @@ fn finds_the_ram() {
 fn finds_the_plic_nested_under_soc() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
     let mut regions = [Region::default(); 4];
-    let n = tree.node_register_regions(b"plic@", &mut regions).unwrap();
+    let n = tree.node_register_regions(b"plic", &mut regions).unwrap();
 
     assert_eq!(n, 1, "the PLIC has one register block (the GIC has two)");
     assert_eq!(regions[0], Region::new(0xc00_0000, 0x60_0000));
@@ -161,7 +161,7 @@ fn reads_a_property_from_every_matching_node() {
 
     let mut isa = [None; 4];
     assert_eq!(
-        tree.node_properties(b"cpu@", b"riscv,isa-base", &mut isa)
+        tree.node_properties(b"cpu", b"riscv,isa-base", &mut isa)
             .unwrap(),
         1
     );
@@ -171,7 +171,7 @@ fn reads_a_property_from_every_matching_node() {
     // A node that exists and has no such property: matched, and reported as `None`.
     let mut absent = [Some(&b"stale"[..]); 4];
     assert_eq!(
-        tree.node_properties(b"cpu@", b"mmu-flavor", &mut absent)
+        tree.node_properties(b"cpu", b"mmu-flavor", &mut absent)
             .unwrap(),
         1
     );
@@ -183,7 +183,7 @@ fn reads_a_property_from_every_matching_node() {
     // A prefix nothing matches.
     let mut nothing = [None; 4];
     assert_eq!(
-        tree.node_properties(b"gpu@", b"reg", &mut nothing).unwrap(),
+        tree.node_properties(b"gpu", b"reg", &mut nothing).unwrap(),
         0
     );
 }
@@ -195,13 +195,15 @@ fn reads_a_property_from_every_matching_node() {
 fn more_nodes_than_slots_reports_the_real_count() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
 
-    // Every node under the root, matched by the empty prefix, into no space at all. The count is
-    // the honest one; nothing was written, because there was nowhere to write it.
+    // Every `virtio_mmio@` node, into no space at all. The count is the honest one; nothing was
+    // written, because there was nowhere to write it.
     let mut none: [Option<&[u8]>; 0] = [];
-    let all = tree.node_properties(b"", b"compatible", &mut none).unwrap();
-    assert!(
-        all > 1,
-        "the tree has many nodes, and it said so with nowhere to put them"
+    let all = tree
+        .node_properties(b"virtio_mmio", b"compatible", &mut none)
+        .unwrap();
+    assert_eq!(
+        all, 8,
+        "the tree has eight virtio nodes, and it said so with nowhere to put them"
     );
 }
 
@@ -215,7 +217,7 @@ fn follows_the_serial_interrupt_parent_to_the_plic() {
     let tree = DeviceTreeBlob::from_bytes(QEMU_RISCV_VIRT).unwrap();
 
     let parent = tree
-        .node_property_inherited(b"serial@", b"interrupt-parent")
+        .node_property_inherited(b"serial", b"interrupt-parent")
         .unwrap()
         .expect("the serial node names its interrupt parent");
     let phandle = u32::from_be_bytes(parent[..4].try_into().unwrap());
