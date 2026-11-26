@@ -22,7 +22,7 @@ impl core::fmt::Debug for Node<'_> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("Node")
-            .field("name", &self.name.escape_ascii())
+            .field("name", &format_args!("{}", self.name.escape_ascii()))
             .field("depth", &self.depth)
             .field("contents_offset", &self.contents_at)
             .finish()

@@ -322,6 +322,10 @@ fn reservations_are_read_entry_by_entry() {
     };
     let blob = reservations(&[(0x1000, 0x1000), (u64::MAX - 0xfff, 0x1000)]);
     assert_eq!(refused(&blob), Some(Error::RegionOverflow));
+    // An entry with no size is not the terminator, so the walk that judges the block when the
+    // tree is built reads on past it to the entry that wraps.
+    let blob = reservations(&[(0x2000, 0), (u64::MAX - 0xfff, 0x1000)]);
+    assert_eq!(refused(&blob), Some(Error::RegionOverflow));
     let blob = reservations(&[(u64::MAX - 0x1000, 0x1000)]);
     let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
     assert_eq!(dt.memory_reservations(&mut out), Ok(1));
@@ -1228,6 +1232,29 @@ fn a_cells_declaration_that_is_not_one_cell_is_ignored() {
 /// `node_register_regions_compatible(b"")` with the first node that has any `compatible` at all. No caller
 /// passes an empty needle; the fuzz target does, and dtoolkit's `is_compatible("")` matches
 /// nothing, which is how measuring the two crates against each other found the difference.
+/// An empty name names no node, not even one whose name starts with its unit address, which the
+/// rule "the name, then `@` and a unit address" would otherwise let it name.
+#[test]
+fn an_empty_name_names_no_node() {
+    let mut b = Blob::new();
+    b.begin_node(b"");
+    b.begin_node(b"@1000");
+    b.prop(b"status", b"okay\0");
+    b.end_node();
+    b.end_node();
+    let blob = b.finish();
+    let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
+
+    assert_eq!(
+        dt.node_property(b"@1000", b"status"),
+        Ok(Some(&b"okay\0"[..]))
+    );
+    assert_eq!(dt.node_property(b"", b"status"), Ok(None));
+    assert_eq!(dt.node_property_inherited(b"", b"status"), Ok(None));
+    let mut out = [None; 2];
+    assert_eq!(dt.node_properties(b"", b"status", &mut out), Ok(0));
+}
+
 #[test]
 fn an_empty_compatible_needle_matches_nothing() {
     let mut b = Blob::new();

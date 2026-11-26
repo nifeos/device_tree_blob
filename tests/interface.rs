@@ -44,6 +44,19 @@ fn debug_prints_the_layout_not_the_bytes() {
     assert!(printed.len() < 200, "{printed}");
 }
 
+/// **A node prints its name, depth and offset, never the blob behind it.**
+#[test]
+fn a_node_prints_its_name_and_place_not_the_bytes() {
+    let tree = DeviceTreeBlob::from_bytes(RISCV).unwrap();
+    let serial = tree.find_node(b"/soc/serial").unwrap();
+    let printed = format!("{serial:?}");
+    assert!(printed.starts_with("Node {"), "{printed}");
+    assert!(printed.contains("name: serial@10000000"), "{printed}");
+    assert!(printed.contains("depth: 3"), "{printed}");
+    assert!(printed.contains("contents_offset: "), "{printed}");
+    assert!(printed.len() < 100, "{printed}");
+}
+
 /// **A region sorts by address and keeps in a set, and an error keeps in a set.**
 #[test]
 fn regions_sort_by_start_then_size_and_hash() {
