@@ -9,6 +9,35 @@
 //!
 //! The format is the flattened one that chapter 5 of the Devicetree Specification (release 0.4)
 //! defines, and the one libfdt reads.
+//!
+//! # Examples
+//!
+//! Parse a blob once, then ask it questions. QEMU's riscv64 `virt` machine, as the crate's test
+//! fixture holds it:
+//!
+//! ```
+//! use device_tree_blob::{DeviceTreeBlob, Region};
+//!
+//! let blob = include_bytes!(concat!(
+//!     env!("CARGO_MANIFEST_DIR"),
+//!     "/tests/fixtures/qemu-riscv64-virt.dtb"
+//! ));
+//! let tree = DeviceTreeBlob::from_bytes(blob)?;
+//!
+//! let mut ram = [Region::default(); 4];
+//! let banks = tree.memory_regions(&mut ram)?;
+//! assert_eq!(&ram[..banks], [Region::new(0x8000_0000, 0x800_0000)]);
+//!
+//! // A device found by what it is, whatever this machine calls its node.
+//! let mut uart = [Region::default(); 1];
+//! let found = tree.node_register_regions_compatible(b"ns16550a", &mut uart)?;
+//! assert_eq!(&uart[..found], [Region::new(0x1000_0000, 0x100)]);
+//!
+//! // Any node by its path, and any of its properties.
+//! let chosen = tree.find_node(b"/chosen").expect("QEMU writes /chosen");
+//! assert_eq!(chosen.property(b"stdout-path"), Some(&b"/soc/serial@10000000\0"[..]));
+//! # Ok::<(), device_tree_blob::Error>(())
+//! ```
 
 #![no_std]
 
@@ -55,6 +84,15 @@ impl Region {
     /// before it can report a failure; a plain add would panic there under overflow checks
     /// (regression in `tests/hostile.rs`). A saturated end is still wrong, so the parser refuses a
     /// wrapping region with [`Error::RegionOverflow`]; this is the backstop, not the check.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use device_tree_blob::Region;
+    ///
+    /// assert_eq!(Region::new(0x1000, 0x100).end(), 0x1100);
+    /// assert_eq!(Region::new(u64::MAX, 2).end(), u64::MAX);
+    /// ```
     pub fn end(&self) -> u64 {
         self.start.saturating_add(self.size_bytes)
     }
@@ -89,8 +127,9 @@ pub enum Error {
     /// The caller's output slice was too small to hold every region found, or, for
     /// [`node_properties`](DeviceTreeBlob::node_properties), a value for every matching node.
     TooManyRegions,
-    /// The structure block's nesting does not balance: a node closes when none is open, or the
-    /// block's end token arrives while a node is still open.
+    /// The structure block is not one tree: a node closes when none is open, the block's end
+    /// token arrives while a node is still open, there is no root node or a second one, or a
+    /// property lies outside every node or after its node's first child.
     BadStructure,
     /// The structure block nests deeper than [`MAXIMUM_DEPTH`].
     TooDeep,
@@ -247,6 +286,28 @@ impl<'a> DeviceTreeBlob<'a> {
     ///
     /// The 8 bytes are read before anything is validated, which is the one leap of faith: a wrong
     /// pointer almost certainly fails the magic check that follows, but an unreadable one faults.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`from_bytes`](Self::from_bytes), and [`Error::TooLarge`] when the header's
+    /// `totalsize` is above [`MAXIMUM_TOTAL_SIZE_BYTES`].
+    ///
+    /// # Examples
+    ///
+    /// A blob in this program's own memory stands in for the one firmware hands over:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob: &'static [u8] = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// // SAFETY: `blob` is a whole device tree blob, readable and never written for the whole program.
+    /// let tree = unsafe { DeviceTreeBlob::from_pointer(blob.as_ptr()) }?;
+    /// assert_eq!(tree.total_size(), blob.len());
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     #[doc(alias = "from_ptr")]
     pub unsafe fn from_pointer(pointer: *const u8) -> Result<Self, Error> {
         // Read just enough to learn how long the thing claims to be.
@@ -268,9 +329,8 @@ impl<'a> DeviceTreeBlob<'a> {
         Self::from_bytes(bytes)
     }
 
-    /// Parse a blob already in hand as a safe slice, rather than through an unchecked pointer.
-    /// This is what [`from_pointer`](Self::from_pointer) delegates to once it has trusted the header
-    /// enough to build one, and it is the entry point every host test uses directly.
+    /// Parse a blob already in hand as a safe slice. [`from_pointer`](Self::from_pointer) builds
+    /// one once it has trusted the header, and calls this.
     ///
     /// A `bytes` longer than the header's `totalsize` is accepted and trimmed to it, so a blob
     /// read into a larger buffer parses as itself. [`MAXIMUM_TOTAL_SIZE_BYTES`] bounds
@@ -280,29 +340,25 @@ impl<'a> DeviceTreeBlob<'a> {
     /// block (`size_dt_strings` bytes) must lie inside the blob; `boot_cpuid_phys` is not read.
     ///
     /// It then walks the memory reservation block and the whole structure block once, so a tree it
-    /// returns is whole: every later lookup on it walks only tokens, names and nesting this walk
-    /// accepted, and fails, if at all, only on the shape of a value it reads or a full output
-    /// slice.
+    /// returns is whole: a later lookup meets only tokens, names and nesting this walk accepted,
+    /// and fails, if at all, on the shape of a value it reads or a full output slice.
     ///
     /// # Errors
     ///
     /// - [`Error::BadMagic`] when the first word is not `0xd00dfeed`.
     /// - [`Error::UnsupportedVersion`] when `last_compatible_version` is above 17.
     /// - [`Error::Truncated`] when the header, a block or a value runs past the blob, or the
-    ///   structure block ends before its `FDT_END`.
-    /// - [`Error::BadToken`] for a token the specification does not define.
-    /// - [`Error::BadValue`] for a node or property name with no terminating zero byte.
-    /// - [`Error::TooDeep`] for nesting deeper than [`MAXIMUM_DEPTH`].
+    ///   structure block ends before its `FDT_END`; [`Error::BadToken`] for a token the
+    ///   specification does not define; [`Error::BadValue`] for a name with no terminating zero
+    ///   byte; [`Error::TooDeep`] for nesting deeper than [`MAXIMUM_DEPTH`].
     /// - [`Error::BadStructure`] for nesting that does not balance, no root node or a second one, a
     ///   property outside every node, or a property after its node's first child.
     /// - [`Error::RegionOverflow`] for a reservation entry that wraps the address space.
     ///
     /// # Examples
     ///
-    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it:
-    ///
     /// ```
-    /// use device_tree_blob::{DeviceTreeBlob, Region};
+    /// use device_tree_blob::DeviceTreeBlob;
     ///
     /// let blob = include_bytes!(concat!(
     ///     env!("CARGO_MANIFEST_DIR"),
@@ -450,8 +506,27 @@ impl<'a> DeviceTreeBlob<'a> {
         root.ok_or(Error::BadStructure)
     }
 
-    /// How many bytes the blob occupies. We need this to mark it as reserved: it is
-    /// sitting in the very RAM we are about to start handing out.
+    /// How many bytes the blob occupies: the header's `totalsize`, which a longer slice given to
+    /// [`from_bytes`](Self::from_bytes) is trimmed to.
+    ///
+    /// The blob usually lies in RAM that the memory nodes describe, so a caller that hands out that
+    /// RAM reserves these bytes for as long as it reads the tree, or copies the blob elsewhere first.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use device_tree_blob::{DeviceTreeBlob, Region};
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// // The span to keep out of the frame allocator while the tree is still read.
+    /// let keep = Region::new(blob.as_ptr() as u64, tree.total_size() as u64);
+    /// assert_eq!(keep.size_bytes, blob.len() as u64);
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     pub fn total_size(&self) -> usize {
         self.bytes.len()
     }
@@ -467,6 +542,29 @@ impl<'a> DeviceTreeBlob<'a> {
     /// An entry whose `start + size` does not fit in 64 bits is [`Error::RegionOverflow`], as a
     /// `reg` pair of the same shape is. The specification places the block on an 8-byte boundary,
     /// and that is not checked: every read here is byte-wise, so a misplaced block reads the same.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooManyRegions`] when `out` is full before the list ends. A wrapping entry was already
+    /// refused by [`from_bytes`](Self::from_bytes).
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it, reserves nothing here:
+    ///
+    /// ```
+    /// use device_tree_blob::{DeviceTreeBlob, Region};
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let mut reserved = [Region::default(); 8];
+    /// assert_eq!(tree.memory_reservations(&mut reserved)?, 0);
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     pub fn memory_reservations(&self, out: &mut [Region]) -> Result<usize, Error> {
         let mut at = self.reservations_offset;
         let mut n = 0;
@@ -520,6 +618,13 @@ impl<'a> DeviceTreeBlob<'a> {
     /// assert_eq!(&ram[..banks], [Region::new(0x8000_0000, 0x800_0000)]);
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::TooManyRegions`] when `out` is full before the last region.
+    /// - [`Error::RegionOverflow`] for a pair whose `start + size` wraps the address space.
+    /// - [`Error::BadValue`] for a `reg` that is not a whole number of (address, size) pairs, or cell
+    ///   counts above [`MAXIMUM_CELLS`], or a cell value wider than 64 bits.
     pub fn memory_regions(&self, out: &mut [Region]) -> Result<usize, Error> {
         // `reg` is a list of (address, size) pairs, but how many 32-bit cells each of those takes
         // is not fixed. It is declared by #address-cells and #size-cells on the PARENT node, which
@@ -594,6 +699,32 @@ impl<'a> DeviceTreeBlob<'a> {
     /// rather than `compatible` is a simplification; [`node_register_regions_compatible`](Self::node_register_regions_compatible)
     /// is the correct lookup. The first match is the answer: one with no `reg` yields zero regions, and
     /// a later match's `reg` is never read in its place.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::TooManyRegions`] when `out` is full before the last region.
+    /// - [`Error::RegionOverflow`] for a pair whose `start + size` wraps the address space.
+    /// - [`Error::BadValue`] for a `reg` that is not a whole number of (address, size) pairs, or cell
+    ///   counts above [`MAXIMUM_CELLS`], or a cell value wider than 64 bits.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it:
+    ///
+    /// ```
+    /// use device_tree_blob::{DeviceTreeBlob, Region};
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let mut uart = [Region::default(); 1];
+    /// let found = tree.node_register_regions(b"serial", &mut uart)?;
+    /// assert_eq!(&uart[..found], [Region::new(0x1000_0000, 0x100)]);
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     #[doc(alias = "reg")]
     pub fn node_register_regions(&self, node: &[u8], out: &mut [Region]) -> Result<usize, Error> {
         // The cell counts declared by the node open at each depth, applying to its children. Depth
@@ -673,6 +804,13 @@ impl<'a> DeviceTreeBlob<'a> {
     /// assert_eq!(&rtc[..found], [Region::new(0x10_1000, 0x1000)]);
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::TooManyRegions`] when `out` is full before the last region.
+    /// - [`Error::RegionOverflow`] for a pair whose `start + size` wraps the address space.
+    /// - [`Error::BadValue`] for a `reg` that is not a whole number of (address, size) pairs, or cell
+    ///   counts above [`MAXIMUM_CELLS`], or a cell value wider than 64 bits.
     #[doc(alias = "reg")]
     pub fn node_register_regions_compatible(
         &self,
@@ -739,6 +877,29 @@ impl<'a> DeviceTreeBlob<'a> {
     /// The property twin of [`node_register_regions_compatible`](Self::node_register_regions_compatible), deciding when the
     /// matched node closes for the same reason. It exists because labels differ between machines:
     /// the platform-level interrupt controller (PLIC) is `plic@c000000` on QEMU `virt` and `interrupt-controller@c000000` on the JH7110.
+    ///
+    /// # Errors
+    ///
+    /// None on a tree [`from_bytes`](Self::from_bytes) built: the value is returned raw, and that
+    /// walk already accepted every token, name and nesting this one meets.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let sources = tree.node_property_compatible(b"riscv,plic0", b"riscv,ndev")?;
+    /// assert_eq!(sources, Some(&0x5f_u32.to_be_bytes()[..]));
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     pub fn node_property_compatible(
         &self,
         compatible: &[u8],
@@ -755,6 +916,30 @@ impl<'a> DeviceTreeBlob<'a> {
     /// `snps,designware-i2c` controllers on the JH7110, whose `clocks` and `resets` sit on
     /// the bus. The parent's slot is filled when the child closes, because a node's properties
     /// precede its first subnode.
+    ///
+    /// # Errors
+    ///
+    /// None on a tree [`from_bytes`](Self::from_bytes) built: the value is returned raw, and that
+    /// walk already accepted every token, name and nesting this one meets.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// // The UART sits under `/soc`, whose addresses are two cells wide.
+    /// let cells = tree.parent_property_compatible(b"ns16550a", b"#address-cells")?;
+    /// assert_eq!(cells, Some(&2_u32.to_be_bytes()[..]));
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     pub fn parent_property_compatible(
         &self,
         compatible: &[u8],
@@ -816,6 +1001,29 @@ impl<'a> DeviceTreeBlob<'a> {
     /// per-binding layouts no general decoder can know (`interrupt-map` is the motivating case:
     /// its entry width depends on three different nodes' cell counts). The caller gets the bytes
     /// (big-endian cells, as the specification lays them out) and owns the interpretation.
+    ///
+    /// # Errors
+    ///
+    /// None on a tree [`from_bytes`](Self::from_bytes) built: the value is returned raw, and that
+    /// walk already accepted every token, name and nesting this one meets.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let console = tree.node_property(b"chosen", b"stdout-path")?;
+    /// assert_eq!(console, Some(&b"/soc/serial@10000000\0"[..]));
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     pub fn node_property(&self, node: &[u8], name: &[u8]) -> Result<Option<&'a [u8]>, Error> {
         let mut target_at: Option<usize> = None;
         let mut tokens = self.tokens();
@@ -855,6 +1063,30 @@ impl<'a> DeviceTreeBlob<'a> {
     /// two `virt` boards and the JH7110 dtsi each write at a different level. The nearest enclosing
     /// value wins, per the spec. A node's properties precede its children, so one walk suffices:
     /// the answer is taken at the target's `END_NODE`.
+    ///
+    /// # Errors
+    ///
+    /// None on a tree [`from_bytes`](Self::from_bytes) built: the value is returned raw, and that
+    /// walk already accepted every token, name and nesting this one meets.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// // The hart has no `timebase-frequency` of its own; `/cpus` carries it.
+    /// let timebase = tree.node_property_inherited(b"cpu", b"timebase-frequency")?;
+    /// assert_eq!(timebase, Some(&10_000_000_u32.to_be_bytes()[..]));
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     pub fn node_property_inherited(
         &self,
         node: &[u8],
@@ -904,6 +1136,32 @@ impl<'a> DeviceTreeBlob<'a> {
     /// controller's `#interrupt-cells`. Both `phandle` and the legacy `linux,phandle` are honored,
     /// because old dtc wrote the latter. As in [`node_property_compatible`](Self::node_property_compatible),
     /// the answer is taken when the matching node closes.
+    ///
+    /// # Errors
+    ///
+    /// None on a tree [`from_bytes`](Self::from_bytes) built: the value is returned raw, and that
+    /// walk already accepted every token, name and nesting this one meets.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// // Every device's `interrupt-parent` is pointer handle 3, the interrupt controller.
+    /// let parent = tree.node_property(b"serial", b"interrupt-parent")?.expect("the UART interrupts");
+    /// let handle = u32::from_be_bytes(parent.try_into().expect("one cell"));
+    /// let sources = tree.pointer_handle_property(handle, b"riscv,ndev")?;
+    /// assert_eq!(sources, Some(&0x5f_u32.to_be_bytes()[..]));
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     #[doc(alias = "phandle")]
     pub fn pointer_handle_property(
         &self,
@@ -973,6 +1231,10 @@ impl<'a> DeviceTreeBlob<'a> {
     /// assert_eq!(isa[..harts], [Some(&b"rv64i\0"[..])]);
     /// # Ok::<(), device_tree_blob::Error>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooManyRegions`] when `out` is full before the last matching node.
     pub fn node_properties(
         &self,
         node: &[u8],
@@ -1029,6 +1291,36 @@ impl<'a> DeviceTreeBlob<'a> {
     /// [`memory_reservations`](Self::memory_reservations) reads; on RISC-V, `OpenSBI` reserves its physical-memory-protection-guarded
     /// region here, and missing it faults the first write into it. Each depth-3 child's `reg` is
     /// decoded with `/reserved-memory`'s own cell counts, which default to the root's.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::TooManyRegions`] when `out` is full before the last region.
+    /// - [`Error::RegionOverflow`] for a pair whose `start + size` wraps the address space.
+    /// - [`Error::BadValue`] for a `reg` that is not a whole number of (address, size) pairs, or cell
+    ///   counts above [`MAXIMUM_CELLS`], or a cell value wider than 64 bits.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it, with the two regions
+    /// `OpenSBI` reserves:
+    ///
+    /// ```
+    /// use device_tree_blob::{DeviceTreeBlob, Region};
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let mut kept = [Region::default(); 8];
+    /// let carved = tree.reserved_memory_regions(&mut kept)?;
+    /// assert_eq!(
+    ///     &kept[..carved],
+    ///     [Region::new(0x8000_0000, 0x4_0000), Region::new(0x8004_0000, 0x4_0000)]
+    /// );
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     pub fn reserved_memory_regions(&self, out: &mut [Region]) -> Result<usize, Error> {
         let mut bus_address_cells = 2u32;
         let mut bus_size_cells = 2u32;
@@ -1078,6 +1370,28 @@ impl<'a> DeviceTreeBlob<'a> {
     /// and said where it put it. A kernel that does not reserve it lets its frame allocator hand it
     /// out to the first caller, and the initial ramdisk is destroyed before anything reads a byte of
     /// it, a bug that shows up far from its cause.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadValue`] when `linux,initrd-start` or `linux,initrd-end` is neither 4 nor 8 bytes
+    /// long.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it, was started without one:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// assert_eq!(tree.initial_ramdisk()?, None);
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     pub fn initial_ramdisk(&self) -> Result<Option<Region>, Error> {
         let mut start: Option<u64> = None;
         let mut end: Option<u64> = None;
@@ -1126,6 +1440,29 @@ impl<'a> DeviceTreeBlob<'a> {
     /// the device-tree patch it applies. Only the root's own `chosen` child counts, as for
     /// [`Self::initial_ramdisk`]. A value with no zero byte is returned whole, since the property's
     /// length bounds it either way.
+    ///
+    /// # Errors
+    ///
+    /// None on a tree [`from_bytes`](Self::from_bytes) built: the value is returned raw, and that
+    /// walk already accepted every token, name and nesting this one meets.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// QEMU's riscv64 `virt` machine, as the crate's test fixture holds it, was started without `-append`:
+    ///
+    /// ```
+    /// use device_tree_blob::DeviceTreeBlob;
+    ///
+    /// let blob = include_bytes!(concat!(
+    ///     env!("CARGO_MANIFEST_DIR"),
+    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
+    /// ));
+    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
+    /// let command_line = tree.boot_arguments()?.unwrap_or(b"");
+    /// assert_eq!(command_line, b"");
+    /// # Ok::<(), device_tree_blob::Error>(())
+    /// ```
     #[doc(alias = "bootargs")]
     pub fn boot_arguments(&self) -> Result<Option<&'a [u8]>, Error> {
         let mut in_chosen = false;
@@ -1313,251 +1650,9 @@ impl<'a> DeviceTreeBlob<'a> {
     }
 }
 
-/// One node of the tree: a handle to where it lies in the blob, which reads nothing until asked.
-///
-/// [`DeviceTreeBlob::root`], [`DeviceTreeBlob::nodes`], [`DeviceTreeBlob::find_node`] and
-/// [`Node::children`] hand one out. It is `Copy` and borrows the blob, as the tree does, and every
-/// walk from it finds only what [`DeviceTreeBlob::from_bytes`] accepted, so none of its methods
-/// fails.
-#[derive(Clone, Copy)]
-pub struct Node<'a> {
-    tree: DeviceTreeBlob<'a>,
-    name: &'a [u8],
-    /// Where the node's properties start, just after its name.
-    contents_at: usize,
-    /// The node's own depth: 1 for the root.
-    depth: usize,
-}
+mod node;
 
-impl core::fmt::Debug for Node<'_> {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("Node")
-            .field("name", &self.name.escape_ascii())
-            .field("depth", &self.depth)
-            .field("contents_offset", &self.contents_at)
-            .finish()
-    }
-}
-
-impl<'a> Node<'a> {
-    /// The node's name, unit address included: `b"serial@10000000"`, or `b""` for the root.
-    pub fn name(&self) -> &'a [u8] {
-        self.name
-    }
-
-    /// The raw value of the node's own property `name`; `None` when the node has none. Nothing is
-    /// inherited from a parent.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use device_tree_blob::DeviceTreeBlob;
-    ///
-    /// let blob = include_bytes!(concat!(
-    ///     env!("CARGO_MANIFEST_DIR"),
-    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
-    /// ));
-    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
-    /// let chosen = tree.find_node(b"/chosen").expect("QEMU writes /chosen");
-    /// assert!(chosen.property(b"stdout-path").is_some());
-    /// assert_eq!(chosen.property(b"no-such-property"), None);
-    /// # Ok::<(), device_tree_blob::Error>(())
-    /// ```
-    pub fn property(&self, name: &[u8]) -> Option<&'a [u8]> {
-        let mut tokens = self.walk();
-        while let Ok(Some((depth, Token::Property { name: found, value }))) = tokens.step() {
-            if depth == self.depth && found.is(name) {
-                return Some(value);
-            }
-        }
-        None
-    }
-
-    /// The node's own properties, in the order the blob holds them.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use device_tree_blob::DeviceTreeBlob;
-    ///
-    /// let blob = include_bytes!(concat!(
-    ///     env!("CARGO_MANIFEST_DIR"),
-    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
-    /// ));
-    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
-    /// let root = tree.root();
-    /// assert!(root.properties().any(|property| property.name() == b"#address-cells"));
-    /// for property in root.properties() {
-    ///     assert!(!property.name().is_empty());
-    /// }
-    /// # Ok::<(), device_tree_blob::Error>(())
-    /// ```
-    pub fn properties(&self) -> Properties<'a> {
-        Properties {
-            tokens: Some(self.walk()),
-            depth: self.depth,
-        }
-    }
-
-    /// The node's children, in the order the blob holds them; their own children are not visited.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use device_tree_blob::DeviceTreeBlob;
-    ///
-    /// let blob = include_bytes!(concat!(
-    ///     env!("CARGO_MANIFEST_DIR"),
-    ///     "/tests/fixtures/qemu-riscv64-virt.dtb"
-    /// ));
-    /// let tree = DeviceTreeBlob::from_bytes(blob)?;
-    /// let cpus = tree.find_node(b"/cpus").expect("QEMU writes /cpus");
-    /// let harts = cpus
-    ///     .children()
-    ///     .filter(|child| child.property(b"device_type") == Some(b"cpu\0"))
-    ///     .count();
-    /// assert!(harts >= 1);
-    /// # Ok::<(), device_tree_blob::Error>(())
-    /// ```
-    pub fn children(&self) -> Children<'a> {
-        Children {
-            tokens: Some(self.walk()),
-            depth: self.depth,
-        }
-    }
-
-    /// A walk over the node's contents, from its first property.
-    fn walk(&self) -> Tokens<'a> {
-        Tokens {
-            tree: self.tree,
-            at: self.contents_at,
-            depth: self.depth,
-        }
-    }
-}
-
-/// One property of a node: its name and its raw value, as the blob holds them.
-///
-/// [`Node::properties`] hands these out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Property<'a> {
-    name: &'a [u8],
-    value: &'a [u8],
-}
-
-impl<'a> Property<'a> {
-    /// The property's name, from the strings block: `b"compatible"`.
-    pub fn name(&self) -> &'a [u8] {
-        self.name
-    }
-
-    /// The property's raw value, which may be empty: a property with no value is a flag.
-    pub fn value(&self) -> &'a [u8] {
-        self.value
-    }
-}
-
-/// Every node of a tree, in the order the blob holds them; [`DeviceTreeBlob::nodes`].
-#[derive(Clone, Debug)]
-pub struct Nodes<'a> {
-    /// `None` once the walk has ended.
-    tokens: Option<Tokens<'a>>,
-}
-
-impl<'a> Iterator for Nodes<'a> {
-    type Item = Node<'a>;
-
-    fn next(&mut self) -> Option<Node<'a>> {
-        let tokens = self.tokens.as_mut()?;
-        loop {
-            match tokens.step() {
-                Ok(Some((depth, Token::BeginNode { name }))) => {
-                    return Some(Node {
-                        tree: tokens.tree,
-                        name,
-                        contents_at: tokens.at,
-                        depth,
-                    });
-                }
-                Ok(Some(_)) => {}
-                // `from_bytes` walked the same tokens, so the walk meets no error; one would end
-                // it.
-                Ok(None) | Err(_) => {
-                    self.tokens = None;
-                    return None;
-                }
-            }
-        }
-    }
-}
-
-impl core::iter::FusedIterator for Nodes<'_> {}
-
-/// The children of one node; [`Node::children`].
-#[derive(Clone, Debug)]
-pub struct Children<'a> {
-    /// `None` once the node has closed.
-    tokens: Option<Tokens<'a>>,
-    /// The parent's depth.
-    depth: usize,
-}
-
-impl<'a> Iterator for Children<'a> {
-    type Item = Node<'a>;
-
-    fn next(&mut self) -> Option<Node<'a>> {
-        let tokens = self.tokens.as_mut()?;
-        loop {
-            match tokens.step() {
-                Ok(Some((depth, Token::BeginNode { name }))) if depth == self.depth + 1 => {
-                    return Some(Node {
-                        tree: tokens.tree,
-                        name,
-                        contents_at: tokens.at,
-                        depth,
-                    });
-                }
-                Ok(Some((depth, Token::EndNode))) if depth == self.depth => break,
-                Ok(Some(_)) => {}
-                Ok(None) | Err(_) => break,
-            }
-        }
-        self.tokens = None;
-        None
-    }
-}
-
-impl core::iter::FusedIterator for Children<'_> {}
-
-/// The properties of one node; [`Node::properties`].
-#[derive(Clone, Debug)]
-pub struct Properties<'a> {
-    /// `None` once the node's properties have ended.
-    tokens: Option<Tokens<'a>>,
-    /// The node's depth.
-    depth: usize,
-}
-
-impl<'a> Iterator for Properties<'a> {
-    type Item = Property<'a>;
-
-    fn next(&mut self) -> Option<Property<'a>> {
-        let tokens = self.tokens.as_mut()?;
-        // A node's properties come before its first child, as `from_bytes` checked, so the first
-        // token that is not a property of this node ends them.
-        if let Ok(Some((depth, Token::Property { name, value }))) = tokens.step()
-            && depth == self.depth
-            && let Ok(name) = name.read()
-        {
-            return Some(Property { name, value });
-        }
-        self.tokens = None;
-        None
-    }
-}
-
-impl core::iter::FusedIterator for Properties<'_> {}
+pub use node::{Children, Node, Nodes, Properties, Property};
 
 /// One slot per depth a walk can reach, and one for depth 0 above the root, so a per-depth stack
 /// indexed by a depth [`Tokens`] hands out is never out of bounds.
@@ -1841,167 +1936,4 @@ mod tests {
 /// which is as far as bounded model checking reaches over a structure of real size; the fuzz target
 /// `device_tree_blob_walk` covers the whole walk from the other side.
 #[cfg(kani)]
-mod verification {
-    use super::*;
-
-    /// Enough bytes to place a `be64` read at a few different offsets.
-    const N: usize = 12;
-
-    /// Falsification: replayable `falsifications/verification.be32_is_total.patch`
-    /// **`be32` is total: no offset panics.** For any bytes and any offset, `be32` returns `Ok` or
-    /// `Err(Truncated)`, never panicking, even at `usize::MAX` where the old `at + 4` would have
-    /// wrapped. This is the hardening proved.
-    #[kani::proof]
-    fn be32_is_total() {
-        let bytes: [u8; N] = kani::any();
-        let at: usize = kani::any();
-        let _ = be32(&bytes, at);
-    }
-
-    /// Falsification: replayable `falsifications/verification.be64_is_total.patch`
-    /// **`be64` is total: no offset panics.** As `be32`, for the 8-byte read.
-    #[kani::proof]
-    fn be64_is_total() {
-        let bytes: [u8; N] = kani::any();
-        let at: usize = kani::any();
-        let _ = be64(&bytes, at);
-    }
-
-    /// Falsification: replayable `falsifications/verification.be32_reads_big_endian_when_in_bounds.patch`
-    /// **An in-bounds `be32` reads four big-endian bytes.** When it returns `Ok`, the value is
-    /// exactly `bytes[at..at+4]` most-significant-byte first, so the endianness conversion the whole
-    /// crate depends on is correct, for every input.
-    #[kani::proof]
-    fn be32_reads_big_endian_when_in_bounds() {
-        let bytes: [u8; N] = kani::any();
-        let at: usize = kani::any();
-        if let Ok(v) = be32(&bytes, at) {
-            let expected = ((bytes[at] as u32) << 24)
-                | ((bytes[at + 1] as u32) << 16)
-                | ((bytes[at + 2] as u32) << 8)
-                | (bytes[at + 3] as u32);
-            assert_eq!(v, expected);
-        }
-    }
-
-    /// Falsification: replayable `falsifications/verification.align4_rounds_up_to_a_multiple_of_four.patch`
-    /// **`align4` rounds up to a multiple of four.** For any length, `align4(n)` is either `None`
-    /// (only when rounding up would wrap) or a multiple of 4 that is at least `n` and less than
-    /// `n + 4`.
-    #[kani::proof]
-    fn align4_rounds_up_to_a_multiple_of_four() {
-        let n: usize = kani::any();
-        match align4(n) {
-            Some(a) => {
-                assert!(a.is_multiple_of(4));
-                assert!(a >= n);
-                assert!(a - n < 4);
-            }
-            None => assert!(n > usize::MAX - 3),
-        }
-    }
-
-    /// Falsification: replayable `falsifications/verification.skip_padded_never_wraps.patch`
-    /// **Stepping over padded data is total.** For any position and length, `skip_padded` returns
-    /// a position at least as far along or refuses; it never panics or wraps.
-    #[kani::proof]
-    fn skip_padded_never_wraps() {
-        let at: usize = kani::any();
-        let n: usize = kani::any();
-        if let Ok(next) = skip_padded(at, n) {
-            assert!(next >= at);
-            assert!(next - at >= n);
-        }
-    }
-
-    /// Falsification: replayable `falsifications/verification.cells_refuses_a_value_wider_than_64_bits.patch`
-    /// **`cells` refuses a value wider than 64 bits.** For any value of up to five cells, an `Ok`
-    /// means every cell above the low two is zero and the answer is the low two, most significant
-    /// first; a nonzero cell above them is refused rather than shifted out.
-    #[kani::proof]
-    #[kani::unwind(14)]
-    fn cells_refuses_a_value_wider_than_64_bits() {
-        let bytes: [u8; 20] = kani::any();
-        let count: usize = kani::any();
-        kani::assume(count <= 5);
-        let value = &bytes[..count * 4];
-        let low = count.saturating_sub(2) * 4;
-        match cells(value) {
-            Ok(number) => {
-                assert!(value[..low].iter().all(|&byte| byte == 0));
-                let mut expected = 0u64;
-                for &byte in &value[low..] {
-                    expected = (expected << 8) | byte as u64;
-                }
-                assert_eq!(number, expected);
-            }
-            Err(error) => {
-                assert_eq!(error, Error::BadValue);
-                assert!(value[..low].iter().any(|&byte| byte != 0));
-            }
-        }
-    }
-
-    /// Falsification: replayable `falsifications/verification.decode_regions_stays_inside_its_output.patch`
-    /// **`decode_regions` never panics and never writes past `out`.** For any `reg` value of up to
-    /// 24 bytes, any cell counts and a two-slot `out`, it returns a count no larger than `out`, or
-    /// refuses.
-    #[kani::proof]
-    #[kani::unwind(8)]
-    fn decode_regions_stays_inside_its_output() {
-        let bytes: [u8; 24] = kani::any();
-        let length: usize = kani::any();
-        kani::assume(length <= bytes.len());
-        let mut out = [Region {
-            start: 0,
-            size_bytes: 0,
-        }; 2];
-        if let Ok(found) = decode_regions(&bytes[..length], kani::any(), kani::any(), &mut out) {
-            assert!(found <= out.len());
-        }
-    }
-
-    /// Falsification: replayable `falsifications/verification.from_bytes_is_total.patch`
-    /// **`from_bytes` is total.** For any buffer of up to 48 bytes (a header and a little more), it
-    /// returns a tree or an error and never panics, and a tree it returns lies inside the buffer.
-    #[kani::proof]
-    fn from_bytes_is_total() {
-        let bytes: [u8; 48] = kani::any();
-        let length: usize = kani::any();
-        kani::assume(length <= bytes.len());
-        if let Ok(tree) = DeviceTreeBlob::from_bytes(&bytes[..length]) {
-            assert!(tree.total_size() <= length);
-            assert!(tree.structure.len() <= tree.total_size());
-        }
-    }
-
-    /// Falsification: replayable `falsifications/verification.a_token_step_is_total_and_moves_forward.patch`
-    /// **One step of the token walk is total, moves forward, and keeps the depth in bounds.** Over
-    /// any 56-byte blob whose header `from_bytes` accepts and whose structure and strings blocks
-    /// start after the header, whatever those blocks hold, three steps each return a token, the end
-    /// or an error without panicking; each token
-    /// moves the cursor forward, so no walk can stall, and the depth never passes `MAXIMUM_DEPTH`.
-    /// Starting both blocks after the header bounds every name scan at 16 bytes, which is what
-    /// keeps the unwinding small; the bytes of the blocks themselves are unconstrained.
-    #[kani::proof]
-    #[kani::unwind(17)]
-    fn a_token_step_is_total_and_moves_forward() {
-        let bytes: [u8; 56] = kani::any();
-        let Ok(tree) = DeviceTreeBlob::from_header(&bytes) else {
-            return;
-        };
-        kani::assume(tree.structure_offset == HEADER_BYTES && tree.strings_offset >= HEADER_BYTES);
-        let mut tokens = tree.tokens();
-        for _ in 0..3 {
-            let before = tokens.at;
-            match tokens.step() {
-                Ok(Some((depth, _))) => {
-                    assert!(tokens.at > before);
-                    assert!(depth <= MAXIMUM_DEPTH);
-                    assert!(tokens.depth <= MAXIMUM_DEPTH);
-                }
-                Ok(None) | Err(_) => return,
-            }
-        }
-    }
-}
+mod verification;
