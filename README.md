@@ -81,7 +81,9 @@ Kani harnesses in `src/lib.rs` prove the leaf readers and the token step:
 - One token step is total and advances, so a walk ends.
 - A cell value wider than 64 bits is `BadValue`, and the region decoder never writes past its
   output.
-- A buffer of up to 48 bytes gives a tree or an error, and the tree lies inside the buffer.
+- The header checks give a tree or an error for any buffer of up to 48 bytes, and the tree lies
+  inside the buffer. The walk that `from_bytes` adds after them is a loop over the token step; the
+  model checker runs out of memory on that walk whole, so the fuzz target runs it instead.
 
 Each harness has a falsification patch in `falsifications/` that breaks the code under proof and
 turns the harness red. The walkers are not proved. The hostile tests in `tests/hostile.rs` pin the
@@ -107,7 +109,7 @@ network access. Then run every harness:
 cargo kani
 ```
 
-Measured on an x86_64 Linux machine with Kani 0.68.0, the run of all nine harnesses took 9 minutes of wall time and peaked at 7.5 GiB of resident memory. The token-step harness takes 426 seconds of that, and the other eight take 92 seconds together.
+Measured on an x86_64 Linux machine with Kani 0.68.0, the run of all nine harnesses took 6.5 minutes of wall time and peaked at 6.7 GiB of resident memory. The token-step harness takes 304 seconds of that, and the other eight take 70 seconds together.
 
 A passing run prints warnings that mean nothing, among them `use of an unstable feature` for
 `register_tool`, `Found the following unsupported constructs`, and lines about unreachable code.

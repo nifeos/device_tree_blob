@@ -1,0 +1,22 @@
+Falsifies `device_tree_blob::verification::the_header_checks_are_total`.
+
+The defect: the header checks of `from_bytes` drop the check that the buffer holds the
+`totalsize` the header declares. The remaining check still refuses a size smaller than a header,
+so the function still reads as validating the size; but a header that claims more bytes than
+the buffer holds then reaches `&bytes[..total]` and panics, where it should be `Truncated`.
+
+Expected to fail: the bounds check on `&bytes[..total]`, for any buffer whose header declares a
+`totalsize` larger than the buffer.
+
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -239,7 +239,7 @@
+         }
+ 
+         let total = be32(bytes, 4)? as usize;
+-        if bytes.len() < total || total < HEADER_BYTES {
++        if total < HEADER_BYTES {
+             return Err(Error::Truncated);
+         }
+ 

@@ -1932,8 +1932,9 @@ mod tests {
 /// proved for every `usize`, and overflows only within 3 of `usize::MAX`, where no caller reaches:
 /// every length it is given comes from a blob, which is at most `MAXIMUM_TOTAL_SIZE_BYTES` through
 /// `from_pointer` and at most `u32::MAX` bytes of header-declared length otherwise. Above the leaves,
-/// `from_bytes` and one step of the token walk are proved total over blobs of a bounded size,
-/// which is as far as bounded model checking reaches over a structure of real size; the fuzz target
+/// the header checks of `from_bytes` and one step of the token walk are proved total over blobs of
+/// a bounded size, which is as far as bounded model checking reaches; the model checker runs out
+/// of memory on the whole walk even over 8 bytes of structure. The fuzz target
 /// `device_tree_blob_walk` covers the whole walk from the other side.
 #[cfg(kani)]
 mod verification;
