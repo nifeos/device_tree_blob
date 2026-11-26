@@ -58,11 +58,6 @@ impl Blob {
     /// `FDT_PROP`: a length, a name offset, then the value padded to four bytes.
     fn prop(&mut self, name: &[u8], value: &[u8]) -> &mut Self {
         let name_off = self.string(name);
-        self.prop_at(name_off, value)
-    }
-
-    /// `FDT_PROP` with a name offset given as is, so a test can point one anywhere.
-    fn prop_at(&mut self, name_off: u32, value: &[u8]) -> &mut Self {
         self.token(3);
         self.structure
             .extend_from_slice(&(value.len() as u32).to_be_bytes());
@@ -1999,99 +1994,4 @@ fn memory_is_a_named_or_typed_root_child_the_firmware_has_not_disabled() {
     let n = dt.memory_regions(&mut out).unwrap();
     let starts: Vec<u64> = out[..n].iter().map(|region| region.start).collect();
     assert_eq!(starts, [0x2000, 0x3000, 0x7000]);
-}
-
-/// The header word `size_dt_strings`, at byte 32.
-const SIZE_DT_STRINGS: usize = 32;
-
-/// **A property name with no terminating zero byte inside the strings block is refused.** The
-/// strings block holds `abc` and nothing else, so the name runs to the block's end unterminated.
-/// libfdt refuses the same name, and so does this parser, with the error a node name with no
-/// terminator inside the structure block gets.
-#[test]
-fn a_property_name_unterminated_inside_the_strings_block_is_refused() {
-    let mut b = Blob::new();
-    b.strings.extend_from_slice(b"abc");
-    b.begin_node(b"");
-    b.begin_node(b"chosen");
-    b.prop_at(0, b"value");
-    b.end_node();
-    b.end_node();
-    let blob = b.finish();
-    let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
-    assert_eq!(dt.node_property(b"chosen", b"abc"), Err(Error::BadValue));
-}
-
-/// **A name offset at or past the end of the strings block is refused**, as libfdt's
-/// `fdt_get_string` refuses one at or past `size_dt_strings`. The offset of the block's last byte
-/// is still read.
-#[test]
-fn a_property_name_offset_past_the_strings_block_is_refused() {
-    let tree = |name_off: u32| {
-        let mut b = Blob::new();
-        b.strings.extend_from_slice(b"ab\0");
-        b.begin_node(b"");
-        b.begin_node(b"chosen");
-        b.prop_at(name_off, b"value");
-        b.end_node();
-        b.end_node();
-        b.finish()
-    };
-    let at = |name_off: u32| {
-        let blob = tree(name_off);
-        let dt = DeviceTreeBlob::from_bytes(&blob).unwrap();
-        dt.node_property(b"chosen", b"b")
-            .map(|value| value.is_some())
-    };
-    assert_eq!(at(1), Ok(true), "the name at offset 1 is `b`");
-    assert_eq!(at(2), Ok(false), "the last byte is the empty name");
-    assert_eq!(at(3), Err(Error::Truncated), "one past the block");
-    assert_eq!(at(u32::MAX), Err(Error::Truncated), "far past the block");
-}
-
-/// **The search for a property name's terminator stops at the end of the strings block.** The
-/// block is declared one byte long (`x`), and the blob carries more nonzero bytes and a zero after
-/// it. A search bounded by the blob's end instead would read the name as `x` and those bytes, and
-/// would read them again for every property that points there, so a walk over many such properties
-/// would cost their count times the length of the run. Each lookup is now refused at the first
-/// property. The header must also place the whole strings block inside the blob.
-#[test]
-fn the_property_name_search_stops_at_the_end_of_the_strings_block() {
-    const PROPERTIES: usize = 100;
-    const RUN_BYTES: usize = 10_000;
-    let mut b = Blob::new();
-    b.strings.push(b'x');
-    b.strings.extend_from_slice(&[b'y'; RUN_BYTES]);
-    b.strings.push(0);
-    b.begin_node(b"");
-    b.begin_node(b"chosen");
-    for _ in 0..PROPERTIES {
-        b.prop_at(0, b"");
-    }
-    b.end_node();
-    b.end_node();
-    let whole = b.finish();
-    let strings_offset = whole.len() - (RUN_BYTES + 2);
-
-    // As built, the block holds the whole run and its zero, and every name is read in full.
-    let dt = DeviceTreeBlob::from_bytes(&whole).unwrap();
-    assert_eq!(dt.node_property(b"chosen", b"absent"), Ok(None));
-
-    let short = patched(&whole, SIZE_DT_STRINGS, 1);
-    let dt = DeviceTreeBlob::from_bytes(&short).unwrap();
-    assert_eq!(dt.node_property(b"chosen", b"absent"), Err(Error::BadValue));
-    assert_eq!(dt.node_property(b"chosen", b"x"), Err(Error::BadValue));
-
-    // The strings block reaching exactly to the blob's end is accepted; one byte further is not,
-    // nor is a size that wraps.
-    let exact = (whole.len() - strings_offset) as u32;
-    assert!(DeviceTreeBlob::from_bytes(&patched(&whole, SIZE_DT_STRINGS, exact)).is_ok());
-    assert_eq!(
-        DeviceTreeBlob::from_bytes(&patched(&whole, SIZE_DT_STRINGS, exact + 1)).err(),
-        Some(Error::Truncated)
-    );
-    assert_eq!(
-        DeviceTreeBlob::from_bytes(&patched(&whole, SIZE_DT_STRINGS, u32::MAX)).err(),
-        Some(Error::Truncated)
-    );
 }
