@@ -7,9 +7,9 @@ sentence beside it.
 
 - First version.
 - A property name is looked up inside the strings block alone, as the specification and libfdt
-  read one: the header must place the block (`size_dt_strings` bytes) inside the blob, a name
-  offset at or past the block's end is `Truncated`, and a name with no terminating zero byte
-  inside the block is `BadValue`.
+  read one. The header must place the block (`size_dt_strings` bytes) inside the blob. A name
+  offset at or past the block's end is `Truncated`. A name with no terminating zero byte inside
+  the block is `BadValue`.
 
 ## BUGS
 
